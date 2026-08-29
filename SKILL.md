@@ -1,6 +1,6 @@
 ---
 name: ark-web
-description: AI 浏览器控制统一技能（文本 + 视觉二合一）。Chrome 插件 + Bridge Server (localhost:9333) 真实操控浏览器：导航/真实点击/表单填充/截图/PDF/网络模拟与响应体/设备媒体模拟/Web Vitals/30+ 维度审计引擎，120 端点。内置模型自检门——多模态模型启用视觉模块（snapshot 截图+坐标锚点+SoM 标注，无需选择器），纯文本模型走选择器工作流。使用场景：让 AI 操作浏览器、测试网页、抓取数据、视觉 QA、性能审计、多标签并行。
+description: AI 浏览器控制统一技能（文本 + 视觉二合一）。Chrome 插件 + Bridge Server (localhost:9333) 真实操控浏览器：导航/真实点击/表单填充/截图/PDF/网络模拟与响应体/设备媒体模拟/Web Vitals/30+ 维度审计引擎，117 端点。内置模型自检门——多模态模型启用视觉模块（snapshot 截图+坐标锚点+SoM 标注，无需选择器），纯文本模型走选择器工作流。使用场景：让 AI 操作浏览器、测试网页、抓取数据、视觉 QA、性能审计、多标签并行。
 ---
 
 # Ark Web — AI 浏览器控制统一技能 v9（文本 + 视觉二合一）
@@ -48,6 +48,30 @@ curl http://localhost:9333/status
 ```
 
 > server 重启后插件靠 alarms+keepalive 自动重连; 不生效时去 chrome://extensions 点「重新加载」。
+
+## 配置 (端口 / 环境变量)
+
+端口通过**环境变量**控制(不是命令行参数), 默认 `HTTP 9333` / `WS 9334`。**推荐只改 HTTP 端口, WS 端口保持默认** —— 插件后台 `extension/background.js:477` 硬编码连 `ws://localhost:9334`, 不读环境变量, 改了 WS 端口插件就 `connected:false`:
+
+```bash
+# macOS / Linux: 只改 HTTP 端口(推荐), WS 保持 9334
+export BRIDGE_PORT=9335        # HTTP API (AI/CLI/curl 调用的端口)
+node server/bridge-server.js   # 插件仍连 ws://localhost:9334, 不受影响
+
+# 若确实要改 WS 端口: 必须同步改插件源码 background.js 的 this.serverPort=9334 → 新端口, 再重载插件
+```
+
+```powershell
+# Windows PowerShell: 只改 HTTP 端口
+$env:BRIDGE_PORT=9335; node server\bridge-server.js
+```
+
+改端口后: ① 用如上环境变量启动; ② 所有 curl 调用的 `:9333` 换成新端口; ③ **WS 端口(9334)保持默认**, 插件即可正常连接。若出现持续 `connected:false` 且已重载插件, 多半是 WS 端口被改了。
+**注意**: CLI `browser-client.js` **不支持 `--port`**, 其入口固定用 `new BrowserClient({session})`(port 恒 9333)。若你的 CLI 换了 HTTP 端口, 需改用底层 `BrowserClient` 类构造时传 `{host, port}` 或直接 curl 到新端口, 不能用当前 CLI 传参调整。
+
+**依赖安装**: 首次需 `cd server && npm install`(start.bat/start.sh 已自动执行)。依赖只在 `server/` 目录, 改端口不影响依赖。
+
+> 更多运行时默认值(缓存 TTL、超时、会话轮询)见 §4 / §5, 无需配置, 已内建。
 
 ---
 
@@ -142,7 +166,7 @@ node client\browser-client.js chain "open https://www.bing.com" "wait-load" "sna
 
 ---
 
-## §3 能力速查 (统一端点表, 120 个)
+## §3 能力速查 (统一端点表, 117 个)
 
 **⚡ = 需 CDP 调试授权**(未启用自动降级脚本模拟)
 

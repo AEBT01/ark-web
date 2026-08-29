@@ -31,7 +31,7 @@ AI agents should load `SKILL.md` — a unified manual with a self-gating step: m
 │   Chrome 插件        │ ◄──────────────► │   Bridge Server     │ ◄──────────► │   AI / CLI / curl   │
 │   (extension/)      │   ws://9334      │   (server/)         │   :9333      │                     │
 │                     │                  │                     │              │  browser-client.js  │
-│  • background: CDP  │                  │  • HTTP API (113)   │              │  ark.js (别名)      │
+│  • background: CDP  │                  │  • HTTP API (117)   │              │  ark.js (别名)      │
 │  • content: 日志监控│                  │  • 日志聚合          │              │  直接 HTTP          │
 │  • popup: 授权+状态 │                  │  • 缓存/keep-alive  │              │                     │
 └─────────────────────┘                  └─────────────────────┘              └─────────────────────┘
