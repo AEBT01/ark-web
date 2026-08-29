@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install server deps
+        run: npm --prefix server install
+      - name: Syntax check all JS
+        run: |
+          find . -name "*.js" \
+            -not -path "./server/node_modules/*" \
+            -not -path "./legacy/*" \
+            -not -path "./chrome-profile/*" \
+            -print0 | xargs -0 -I{} node --check {}
+      - name: Endpoint consistency (declared vs implemented)
+        run: node scripts/check-endpoints.js

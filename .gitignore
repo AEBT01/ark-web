@@ -1,0 +1,31 @@
+# 个人浏览器配置(绝不提交)
+chrome-profile/
+
+# 依赖
+server/node_modules/
+node_modules/
+
+# 运行时生成
+data/
+reports/
+agent-request.json
+agent-command.json
+scripts/agent-traces/
+scripts/diagnostics/
+*.log
+
+# 测试产物(截图/PDF 等)
+client/*.png
+client/*.pdf
+*.png
+!extension/icons/*.png
+
+# 构建产物
+dist/
+
+# 历史归档(不再使用)
+legacy/
+
+# 系统文件
+.DS_Store
+Thumbs.db

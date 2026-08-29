@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ark Web</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 380px;
+      min-height: 500px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+    }
+    .header {
+      padding: 16px;
+      background: linear-gradient(135deg, #161b22, #1c2333);
+      border-bottom: 1px solid #30363d;
+    }
+    .header h1 {
+      font-size: 18px;
+      color: #58a6ff;
+      margin-bottom: 4px;
+    }
+    .header .subtitle {
+      font-size: 12px;
+      color: #8b949e;
+    }
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #da3633;
+    }
+    .status-dot.connected { background: #3fb950; }
+    .status-text { font-size: 13px; }
+    .status-text.connected { color: #3fb950; }
+
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #30363d;
+      background: #161b22;
+    }
+    .tab {
+      flex: 1;
+      padding: 10px;
+      text-align: center;
+      font-size: 12px;
+      cursor: pointer;
+      color: #8b949e;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .tab:hover { color: #c9d1d9; }
+    .tab.active {
+      color: #58a6ff;
+      border-bottom-color: #58a6ff;
+    }
+
+    .content {
+      padding: 16px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .content::-webkit-scrollbar { width: 6px; }
+    .content::-webkit-scrollbar-track { background: #0d1117; }
+    .content::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .section-title {
+      font-size: 12px;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+      margin-top: 16px;
+    }
+    .section-title:first-child { margin-top: 0; }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #c9d1d9;
+      font-size: 13px;
+      cursor: pointer;
+      text-align: left;
+      transition: all 0.15s;
+    }
+    .btn:hover {
+      background: #30363d;
+      border-color: #58a6ff;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn .icon { margin-right: 8px; }
+    .btn.primary {
+      background: #1f6feb;
+      border-color: #1f6feb;
+      color: white;
+    }
+    .btn.primary:hover { background: #388bfd; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .card {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 8px;
+    }
+    .card .label {
+      font-size: 11px;
+      color: #8b949e;
+      margin-bottom: 4px;
+    }
+    .card .value {
+      font-size: 16px;
+      font-weight: 600;
+      color: #58a6ff;
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      margin: 2px;
+    }
+    .tag.good { background: #238636; color: white; }
+    .tag.warn { background: #9e6a03; color: white; }
+    .tag.error { background: #da3633; color: white; }
+
+    .log-item {
+      padding: 8px;
+      margin-bottom: 4px;
+      background: #161b22;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: monospace;
+    }
+    .log-item .type {
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .log-item.error .type { color: #da3633; }
+    .log-item.warn .type { color: #d29922; }
+    .log-item.info .type { color: #58a6ff; }
+    .log-item.network .type { color: #3fb950; }
+
+    .footer {
+      padding: 12px 16px;
+      background: #161b22;
+      border-top: 1px solid #30363d;
+      text-align: center;
+    }
+    .footer a {
+      color: #58a6ff;
+      text-decoration: none;
+      font-size: 12px;
+    }
+    .footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Ark Web</h1>
+    <div class="subtitle">AI 浏览器调试桥接插件</div>
+  </div>
+
+  <div class="status-bar">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">未连接</span>
+    <span style="flex:1"></span>
+    <button class="btn" style="width:auto;padding:6px 12px;margin:0" id="refreshBtn">刷新</button>
+  </div>
+
+  <div class="status-bar" style="background:#1c2333">
+    <div class="status-dot" id="cdpDot"></div>
+    <span class="status-text" id="cdpText">调试器未启用</span>
+    <span style="flex:1"></span>
+    <button class="btn" style="width:auto;padding:6px 12px;margin:0;border-color:#58a6ff;color:#58a6ff" id="cdpToggleBtn">启用调试</button>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-panel="overview">概览</div>
+    <div class="tab" data-panel="performance">性能</div>
+    <div class="tab" data-panel="network">网络</div>
+    <div class="tab" data-panel="console">控制台</div>
+    <div class="tab" data-panel="tools">工具</div>
+  </div>
+
+  <div class="content">
+    <!-- 概览面板 -->
+    <div class="panel active" id="panel-overview">
+      <div class="section-title">页面信息</div>
+      <div class="card">
+        <div class="label">标题</div>
+        <div class="value" id="pageTitle" style="font-size:14px">-</div>
+      </div>
+      <div class="card">
+        <div class="label">URL</div>
+        <div class="value" id="pageUrl" style="font-size:12px;word-break:break-all">-</div>
+      </div>
+
+      <div class="section-title">快速统计</div>
+      <div class="grid">
+        <div class="card">
+          <div class="label">DOM 元素</div>
+          <div class="value" id="domCount">-</div>
+        </div>
+        <div class="card">
+          <div class="label">加载资源</div>
+          <div class="value" id="resourceCount">-</div>
+        </div>
+        <div class="card">
+          <div class="label">加载时间</div>
+          <div class="value" id="loadTime">-</div>
+        </div>
+        <div class="card">
+          <div class="label">内存使用</div>
+          <div class="value" id="memoryUsage">-</div>
+        </div>
+      </div>
+
+      <div class="section-title">快速操作</div>
+      <button class="btn" id="screenshotBtn"><span class="icon">📸</span>截图</button>
+      <button class="btn" id="a11yBtn"><span class="icon">♿</span>可访问性检查</button>
+      <button class="btn" id="seoBtn"><span class="icon">🔍</span>SEO 检查</button>
+      <button class="btn" id="securityBtn"><span class="icon">🔒</span>安全检查</button>
+    </div>
+
+    <!-- 性能面板 -->
+    <div class="panel" id="panel-performance">
+      <div class="section-title">Core Web Vitals</div>
+      <div class="grid">
+        <div class="card">
+          <div class="label">LCP</div>
+          <div class="value" id="lcpValue">-</div>
+          <div id="lcpTag"></div>
+        </div>
+        <div class="card">
+          <div class="label">CLS</div>
+          <div class="value" id="clsValue">-</div>
+          <div id="clsTag"></div>
+        </div>
+        <div class="card">
+          <div class="label">TTFB</div>
+          <div class="value" id="ttfbValue">-</div>
+          <div id="ttfbTag"></div>
+        </div>
+        <div class="card">
+          <div class="label">FCP</div>
+          <div class="value" id="fcpValue">-</div>
+          <div id="fcpTag"></div>
+        </div>
+      </div>
+
+      <div class="section-title">资源统计</div>
+      <div id="resourceStats">-</div>
+
+      <div class="section-title">操作</div>
+      <button class="btn" id="refreshPerfBtn"><span class="icon">🔄</span>刷新性能数据</button>
+    </div>
+
+    <!-- 网络面板 -->
+    <div class="panel" id="panel-network">
+      <div class="section-title">网络请求 (<span id="networkCount">0</span>)</div>
+      <div id="networkLogs">-</div>
+    </div>
+
+    <!-- 控制台面板 -->
+    <div class="panel" id="panel-console">
+      <div class="section-title">控制台输出</div>
+      <div id="consoleLogs">-</div>
+    </div>
+
+    <!-- 工具面板 -->
+    <div class="panel" id="panel-tools">
+      <div class="section-title">调试器 (CDP)</div>
+      <div class="card" style="font-size:12px;line-height:1.6">
+        <div id="cdpDetail">未启用。启用后可获得: 真实鼠标/键盘事件、整页截图、真实设备与媒体模拟、网络响应体、异步 JS 执行。</div>
+      </div>
+
+      <div class="section-title">设备模拟</div>
+      <div class="grid">
+        <button class="btn" data-device="iPhone 14">iPhone 14</button>
+        <button class="btn" data-device="iPhone 14 Pro Max">iPhone 14 Pro</button>
+        <button class="btn" data-device="iPad">iPad</button>
+        <button class="btn" data-device="iPad Pro">iPad Pro</button>
+        <button class="btn" data-device="Pixel 7">Pixel 7</button>
+        <button class="btn" data-device="Desktop">Desktop</button>
+      </div>
+      <button class="btn" id="clearDeviceBtn"><span class="icon">🔄</span>清除设备模拟</button>
+
+      <div class="section-title">媒体模拟</div>
+      <button class="btn" id="darkModeBtn"><span class="icon">🌙</span>深色模式</button>
+      <button class="btn" id="reducedMotionBtn"><span class="icon">⏸️</span>动效减半</button>
+      <button class="btn" id="clearMediaBtn"><span class="icon">🔄</span>清除媒体模拟</button>
+
+      <div class="section-title">其他工具</div>
+      <button class="btn" id="getCookiesBtn"><span class="icon">🍪</span>查看 Cookies</button>
+      <button class="btn" id="getStorageBtn"><span class="icon">💾</span>查看 localStorage</button>
+      <button class="btn" id="evaluateBtn"><span class="icon">💻</span>执行 JS</button>
+    </div>
+  </div>
+
+  <div class="footer">
+    <a href="#">Ark Web v2.5.0</a>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
