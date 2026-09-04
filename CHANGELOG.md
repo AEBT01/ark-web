@@ -2,6 +2,14 @@
 
 版本号以 `extension/manifest.json` 的 version 为准。
 
+## v2.9.0 (2026-09-04) — Promo release: English README + Pages + badges（无行为变更）
+
+- **English README**: 新增 `README.en.md`（英文首屏 + badges + comparison），主 `README.md` 顶部加语言切换 + 版本徽章
+- **GitHub Pages**: 新增 `docs/index.html`（单文件落地页：hero/架构/6 特性/Quickstart/端点速览/安全注记），`docs/demo-home.png` + `docs/audit-sample.html` 为演示资产
+- **SEO/topics**: 统一关键词 `ai browser automation / chrome cdp bridge / multimodal snapshot / browser audit / llm tool`；建议 Topics：`ai-agents browser-automation chrome-extension cdp llm-tools multimodal web-audit developer-tools automation`
+- **打包**: `scripts/package.js` INCLUDES 纳入 `README.en.md` + `docs/index.html`；SHA256 改 Node 回退（`powershell.exe Get-FileHash` 受限环境兜底）
+- 无破坏性：端口/WS/117 端点/CLI 不变（以 `scripts/check-endpoints.js` 为准）
+
 ## v2.8.2 (2026-08-29) — T0 修复与完善 (真实 bug × 5 + 跨平台 + 文档)
 
 - **screenshot 串页修复** (`extension/background.js`): 目标为后台标签页的 `http://127.0.0.1/localhost` 页面时, 旧逻辑走 `captureVisibleTab` —— 它永远截【当前激活 tab】, 会把用户正在看的页面截走(串页+隐私)。现仅当目标 tab 就是激活 tab 才走快路径; 后台 tab 一律 CDP 精准截图, 且兜底路径在"目标≠激活 tab"时返回结构化错误而非静默截错页。`/snapshot` 内部复用 `screenshot` 同步受益

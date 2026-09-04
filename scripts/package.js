@@ -46,6 +46,8 @@ const INCLUDES = [
   'start.bat',
   'start.sh',
   'README.md',
+  'README.en.md',
+  'docs/index.html',
   'CHANGELOG.md',
   'SKILL.md',
   'LICENSE'
@@ -80,11 +82,18 @@ function main() {
     `Compress-Archive -Path '${stageDir}\\*' -DestinationPath '${zipPath}' -Force`
   ], { stdio: 'pipe' });
 
-  // 4. 校验和
-  const hash = execFileSync('powershell.exe', [
-    '-NoProfile', '-Command',
-    `(Get-FileHash -Algorithm SHA256 '${zipPath}').Hash`
-  ], { encoding: 'utf8' }).trim();
+  // 4. 校验和（优先 powershell Get-FileHash，受限环境回退 Node crypto）
+  let hash;
+  try {
+    hash = execFileSync('powershell.exe', [
+      '-NoProfile', '-Command',
+      `(Get-FileHash -Algorithm SHA256 '${zipPath}').Hash`
+    ], { encoding: 'utf8' }).trim();
+  } catch (e) {
+    const crypto = require('crypto');
+    hash = crypto.createHash('sha256').update(fs.readFileSync(zipPath)).digest('HEX');
+    console.log('(注: powershell 哈希失败，已用 Node crypto 回退)');
+  }
 
   const zipSize = fs.statSync(zipPath).size;
 

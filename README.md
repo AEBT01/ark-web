@@ -1,5 +1,14 @@
 # Ark Web
 
+> [English](README.en.md) | 中文（本页） | [Live demo](docs/index.html)
+>
+> Control your **real** Chrome from AI — 117 endpoints, snapshot/SoM vision, session isolation, audit engine.
+
+[![version](https://img.shields.io/badge/version-v2.9.0-blue)](https://github.com/AEBT01/ark-web)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![stars](https://img.shields.io/github/stars/AEBT01/ark-web?style=social)](https://github.com/AEBT01/ark-web)
+[![last-commit](https://img.shields.io/github/last-commit/AEBT01/ark-web)](https://github.com/AEBT01/ark-web/commits)
+
 > AI 浏览器调试桥接 — Chrome 插件 + Bridge Server + HTTP API = 真实浏览器控制
 
 ## English

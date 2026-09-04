@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审计报告 - AEBT01/ark-web: AI 浏览器调试桥接: Chrome 插件 + 本地 Bridge Server, 为 AI 提供真实浏览器控制 — 视觉快照/会话隔离/审计引擎/117 端点</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;padding:24px;max-width:1000px;margin:0 auto}
+h1{font-size:22px;margin-bottom:4px;color:#f8fafc}
+.sub{color:#94a3b8;font-size:13px;margin-bottom:20px}
+.head{display:flex;gap:24px;align-items:center;background:#1e293b;border-radius:12px;padding:20px;margin-bottom:20px;flex-wrap:wrap}
+.ring{width:120px;height:120px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.ring-inner{width:88px;height:88px;border-radius:50%;background:#0f172a;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.ring-val{font-size:32px;font-weight:700;color:#f8fafc}
+.ring-max{font-size:12px;color:#64748b}
+.head-info{flex:1;min-width:220px}
+.head-info .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+.metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:20px}
+.metric{background:#1e293b;border-radius:10px;padding:12px}
+.m-label{font-size:11px;color:#94a3b8;margin-bottom:4px}
+.m-value{font-size:20px;font-weight:600}
+.tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}
+.tag.good{background:#14532d;color:#4ade80}
+.tag.needs-improvement{background:#451a03;color:#fbbf24}
+.tag.poor{background:#450a0a;color:#f87171}
+.tag.no-data{background:#1e293b;color:#94a3b8}
+.tag.impact-high{background:#7f1d1d;color:#fca5a5}
+.tag.impact-medium{background:#78350f;color:#fcd34d}
+.tag.impact-low{background:#134e4a;color:#5eead4}
+.tag.effort-low{background:#14532d;color:#4ade80}
+.tag.effort-medium{background:#78350f;color:#fcd34d}
+.tag.effort-high{background:#7f1d1d;color:#fca5a5}
+section{background:#1e293b;border-radius:12px;padding:18px;margin-bottom:20px}
+section h2{font-size:16px;margin-bottom:12px;color:#f1f5f9}
+.insight{background:#0f172a;border-left:3px solid #64748b;border-radius:6px;padding:10px 12px;margin-bottom:8px;font-size:13px;line-height:1.6}
+.insight.warning{border-color:#f59e0b}
+.insight.good{border-color:#22c55e}
+.insight div{margin-top:2px;color:#cbd5e1}
+.cat{margin-bottom:16px}
+.cat-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.cat-name{font-weight:600;font-size:15px}
+.cat-score{font-size:22px;font-weight:700;color:#f8fafc}
+.cat-score small{font-size:11px;color:#64748b;font-weight:400}
+.rule{background:#0f172a;border-radius:8px;padding:10px 12px;margin-bottom:6px}
+.rule-head{display:flex;align-items:center;gap:10px;font-size:13px}
+.rule-name{flex:1}
+.rule-score{font-weight:600;color:#cbd5e1}
+.rule-score small{font-size:10px;color:#64748b}
+.rule-bar{height:4px;background:#334155;border-radius:2px;margin:6px 0}
+.bar-fill{height:100%;border-radius:2px}
+.bar-fill.good{background:#22c55e}
+.bar-fill.needs-improvement{background:#f59e0b}
+.bar-fill.poor{background:#ef4444}
+.bar-fill.no-data{background:#475569}
+.rule-value{font-size:12px;color:#94a3b8}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #334155}
+th{color:#94a3b8;font-weight:500;font-size:12px}
+td.num{font-variant-numeric:tabular-nums}
+.budget-ok{color:#4ade80;font-weight:600}
+.budget-bad{color:#f87171;font-weight:600}
+.footer{text-align:center;color:#475569;font-size:12px;margin-top:8px}
+</style></head><body>
+<h1>AEBT01/ark-web: AI 浏览器调试桥接: Chrome 插件 + 本地 Bridge Server, 为 AI 提供真实浏览器控制 — 视觉快照/会话隔离/审计引擎/117 端点</h1>
+<div class="sub">https://github.com/AEBT01/ark-web · 2026/9/4 14:01:13 · 采集 65ms · Ark Web Audit v1</div>
+<div class="head">
+  <div class="ring" style="background:conic-gradient(#f59e0b 76%, #1e293b 0)"><div class="ring-inner"><div class="ring-val">76</div><div class="ring-max">/100</div></div></div>
+  <div class="head-info">
+    <div style="font-size:28px;font-weight:700">75.8<small style="color:#64748b;font-size:14px;font-weight:400"> / 100</small></div>
+    <div class="tag needs-improvement" style="font-size:13px;padding:4px 12px">需改进</div>
+    <div class="row"><span class="tag needs-improvement">性能 60.4</span><span class="tag needs-improvement">可访问性 84.5</span><span class="tag needs-improvement">SEO 70.9</span><span class="tag good">安全与最佳实践 100</span><span class="tag needs-improvement">资源效率 67.3</span></div>
+  </div>
+</div>
+<div class="metrics">
+  
+    <div class="metric">
+      <div class="m-label">LCP</div>
+      <div class="m-value">3472 ms</div>
+      <span class="tag needs-improvement">需改进</span>
+    </div>
+  
+    <div class="metric">
+      <div class="m-label">FCP</div>
+      <div class="m-value">3472 ms</div>
+      
+    </div>
+  
+    <div class="metric">
+      <div class="m-label">TTFB</div>
+      <div class="m-value">896 ms</div>
+      
+    </div>
+  
+    <div class="metric">
+      <div class="m-label">CLS</div>
+      <div class="m-value">0</div>
+      
+    </div>
+  
+    <div class="metric">
+      <div class="m-label">INP</div>
+      <div class="m-value">no-data</div>
+      
+    </div>
+  
+    <div class="metric">
+      <div class="m-label">资源</div>
+      <div class="m-value">4 KB</div>
+      
+    </div>
+  
+    <div class="metric">
+      <div class="m-label">请求</div>
+      <div class="m-value">250</div>
+      
+    </div>
+  
+    <div class="metric">
+      <div class="m-label">长任务</div>
+      <div class="m-value">0</div>
+      
+    </div>
+  
+    <div class="metric">
+      <div class="m-label">DOM</div>
+      <div class="m-value">1838</div>
+      
+    </div>
+</div>
+<section><h2>洞察</h2>
+    <div class="insight warning">
+      <strong>⚠️ 服务端响应慢</strong>
+      <div>TTFB 896ms ≥ 800ms。优先检查后端处理耗时、数据库查询与 CDN/边缘缓存配置。</div>
+    </div></section>
+<section><h2>优化机会 (按 ROI)</h2>
+<table><tr><th>#</th><th>机会</th><th>预估节省</th><th>影响</th><th>难度</th></tr>
+    <tr>
+      <td>1</td>
+      <td>压缩/响应式处理 4 张过度放大图片</td>
+      <td class="num">视图片而定</td>
+      <td><span class="tag impact-high">high</span></td>
+      <td><span class="tag effort-medium">medium</span></td>
+    </tr></table></section>
+
+    <section><h2>性能 (60.4/100)</h2>
+      
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">LCP 最大内容绘制</span>
+            <span class="rule-score">50<small>分</small></span>
+            <span class="tag needs-improvement">需改进</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill needs-improvement" style="width:50%"></div></div>
+          <div class="rule-value">3472ms — 元素: P.</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">FCP 首次内容绘制</span>
+            <span class="rule-score">0<small>分</small></span>
+            <span class="tag poor">较差</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill poor" style="width:0%"></div></div>
+          <div class="rule-value">3472ms</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">TTFB 服务端响应</span>
+            <span class="rule-score">50<small>分</small></span>
+            <span class="tag needs-improvement">需改进</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill needs-improvement" style="width:50%"></div></div>
+          <div class="rule-value">896ms</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">CLS 布局稳定性</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">0</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">INP 交互响应</span>
+            <span class="rule-score">0<small>分</small></span>
+            <span class="tag no-data">无数据</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill no-data" style="width:0%"></div></div>
+          <div class="rule-value">无交互数据 — 未检测到用户交互, 建议在真实使用中观察</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">长任务</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">0 个 / 共 0ms</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">总资源体积</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">4 KB / 250 个请求</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">阻塞渲染脚本</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">0 个</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">传输压缩</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">0 个文本资源未压缩</div>
+        </div>
+    </section>
+    <section><h2>可访问性 (84.5/100)</h2>
+      
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">图片 alt 属性</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">0 张图片缺少 alt</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">表单标签</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">0 个输入框无标签</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">点击目标尺寸</span>
+            <span class="rule-score">40<small>分</small></span>
+            <span class="tag poor">较差</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill poor" style="width:40%"></div></div>
+          <div class="rule-value">118 个目标 &lt; 44x44px</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">页面语言属性</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">ok</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">aria-hidden 使用</span>
+            <span class="rule-score">50<small>分</small></span>
+            <span class="tag needs-improvement">需改进</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill needs-improvement" style="width:50%"></div></div>
+          <div class="rule-value">45 处含内容的隐藏区域</div>
+        </div>
+    </section>
+    <section><h2>SEO (70.9/100)</h2>
+      
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">标题</span>
+            <span class="rule-score">20<small>分</small></span>
+            <span class="tag poor">较差</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill poor" style="width:20%"></div></div>
+          <div class="rule-value">&quot;AEBT01/ark-web: AI 浏览器调试桥接: Chrome 插件 + 本地 Bridge Server, 为 AI 提供真实浏览器控制 — 视觉快照/会话隔离/审计引擎/117 端点&quot; (96 字符)</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">Meta 描述</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">97 字符</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">H1 标题</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">1 个</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">Canonical URL</span>
+            <span class="rule-score">0<small>分</small></span>
+            <span class="tag poor">较差</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill poor" style="width:0%"></div></div>
+          <div class="rule-value">缺失</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">Open Graph</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">完整</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">结构化数据</span>
+            <span class="rule-score">40<small>分</small></span>
+            <span class="tag needs-improvement">需改进</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill needs-improvement" style="width:40%"></div></div>
+          <div class="rule-value">0 个 JSON-LD</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">移动端 Viewport</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">已设置</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">语言属性</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">en</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">内链</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">121 个内链 / 128 个总链接</div>
+        </div>
+    </section>
+    <section><h2>安全与最佳实践 (100/100)</h2>
+      
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">HTTPS</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">https</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">混合内容</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">0 处</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">CSP 内容安全策略</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">响应头已设置</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">HSTS 强制传输安全</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">已设置</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">X-Content-Type-Options</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">已设置</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">密码表单安全</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">0 个 GET 密码表单</div>
+        </div>
+    </section>
+    <section><h2>资源效率 (67.3/100)</h2>
+      
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">图片尺寸优化</span>
+            <span class="rule-score">40<small>分</small></span>
+            <span class="tag poor">较差</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill poor" style="width:40%"></div></div>
+          <div class="rule-value">4 张图片放大显示</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">字体效率</span>
+            <span class="rule-score">100<small>分</small></span>
+            <span class="tag good">优秀</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill good" style="width:100%"></div></div>
+          <div class="rule-value">1 种字体</div>
+        </div>
+        <div class="rule">
+          <div class="rule-head">
+            <span class="rule-name">DOM 复杂度</span>
+            <span class="rule-score">70<small>分</small></span>
+            <span class="tag needs-improvement">需改进</span>
+          </div>
+          <div class="rule-bar"><div class="bar-fill needs-improvement" style="width:70%"></div></div>
+          <div class="rule-value">1838 个元素 — 最大深度 35</div>
+        </div>
+    </section>
+
+<div class="footer">由 Ark Web 生成 · audit.js v1</div>
+</body></html>
