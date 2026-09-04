@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible Ark Web problem
+labels: [bug]
+body:
+  - type: input
+    attributes:
+      label: Version
+      description: manifest.json version, e.g. v2.9.0
+      placeholder: v2.9.0
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Environment
+      options: [Windows + Chrome, Windows + 夸克, macOS + Chrome, Linux + Chrome]
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What happened
+      description: Expected vs actual, with endpoint + tabId/session if relevant
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Repro steps / minimal chain
+      description: e.g. chain "open ..." "click ..."
+      render: shell
+  - type: textarea
+    attributes:
+      label: Logs / screenshot
+      description: bridge-server console output, snapshot if visual issue

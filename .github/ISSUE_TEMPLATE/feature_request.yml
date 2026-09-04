@@ -1,0 +1,19 @@
+name: Feature request
+description: Suggest an endpoint, emulation, audit rule or Skill improvement
+labels: [enhancement]
+body:
+  - type: dropdown
+    attributes:
+      label: Area
+      options: [endpoint, vision/snapshot, session, audit, emulation, CLI, Skill docs, other]
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposal
+      description: What + why + example call
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
