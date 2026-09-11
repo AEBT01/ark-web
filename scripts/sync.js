@@ -49,6 +49,16 @@ function loadedExtensionDirs() {
   return [...out];
 }
 
+/** 内容比较: 字节相同 → 同; 文本文件行尾差异(CRLF/LF)不视为差异(否则 git 检出后会被反复复制) */
+function sameContent(a, b) {
+  const ba = fs.readFileSync(a), bb = fs.readFileSync(b);
+  if (ba.equals(bb)) return true;
+  const isBinary = (buf) => buf.slice(0, 8192).includes(0);
+  if (isBinary(ba) || isBinary(bb)) return false;
+  const norm = (buf) => buf.toString('utf8').replace(/\r\n/g, '\n');
+  return norm(ba) === norm(bb);
+}
+
 function walkCopy(src, dest, rel) {
   const acted = [];
   const s = path.join(src, rel);
@@ -56,7 +66,7 @@ function walkCopy(src, dest, rel) {
   const stat = fs.statSync(s);
   if (stat.isFile()) {
     const d = path.join(dest, rel);
-    const same = fs.existsSync(d) && fs.readFileSync(s).equals(fs.readFileSync(d));
+    const same = fs.existsSync(d) && sameContent(s, d);
     if (!same) {
       if (!DRY) { fs.mkdirSync(path.dirname(d), { recursive: true }); fs.copyFileSync(s, d); }
       acted.push(rel);
@@ -79,7 +89,7 @@ function backupChanged(src, dest, rel, backupDir) {
   const stat = fs.statSync(s);
   if (stat.isFile()) {
     const d = path.join(dest, rel);
-    if (fs.existsSync(d) && !fs.readFileSync(s).equals(fs.readFileSync(d))) {
+    if (fs.existsSync(d) && !sameContent(s, d)) {
       const b = path.join(backupDir, rel);
       fs.mkdirSync(path.dirname(b), { recursive: true });
       fs.copyFileSync(d, b);

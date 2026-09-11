@@ -28,7 +28,9 @@ const HASH_FILES = [
 ];
 const SKIP_DIRS = new Set(['node_modules', 'AppData', 'Application Data', '.git', 'dist', 'legacy', 'chrome-profile', '.cache', '$Recycle.Bin']);
 
-const hashOf = (f) => { try { return crypto.createHash('md5').update(fs.readFileSync(f)).digest('hex').slice(0, 8); } catch { return '--------'; } };
+// 指纹统一按"行尾归一化(LF)"计算: 副本可能来自不同渠道(git 检出为 CRLF / sync 复制为 LF),
+// 内容相同但行尾不同会造成假漂移, 不应误报
+const hashOf = (f) => { try { const t = fs.readFileSync(f, 'utf8').replace(/\r\n/g, '\n'); return crypto.createHash('md5').update(t, 'utf8').digest('hex').slice(0, 8); } catch { return '--------'; } };
 const isArkRoot = (dir) => {
   try {
     const m = JSON.parse(fs.readFileSync(path.join(dir, 'extension', 'manifest.json'), 'utf8'));
