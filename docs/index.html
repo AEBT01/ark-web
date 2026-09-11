@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ark Web — AI Browser Debug Bridge</title>
+<meta name="description" content="Ark Web v2.8.2: Chrome extension + Bridge Server. Let AI agents control your real browser. 117 endpoints, vision snapshot, session isolation, audit engine.">
+<style>
+:root{--bg:#0a0e14;--bg2:#0d131f;--card:#111927;--line:#1e2a3d;--acc:#00e5a0;--acc2:#5aa9ff;--vio:#b388ff;--txt:#d7e0ee;--mut:#8b98ad;--warn:#ffb454}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--txt);font-family:"JetBrains Mono","SF Mono",Consolas,"Noto Sans SC",monospace;line-height:1.6;overflow-x:hidden}
+a{color:var(--acc);text-decoration:none}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+.bg{position:fixed;inset:0;z-index:-1;background:radial-gradient(600px 300px at 15% 0%,rgba(0,229,160,.09),transparent),radial-gradient(700px 350px at 85% 10%,rgba(90,169,255,.1),transparent),radial-gradient(500px 400px at 50% 100%,rgba(179,136,255,.07),transparent)}
+nav{position:sticky;top:0;z-index:10;background:rgba(10,14,20,.85);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;justify-content:space-between;height:60px}
+.logo{font-weight:800;font-size:18px;letter-spacing:.5px}
+.logo b{color:var(--acc)}
+nav .links a{margin-left:20px;font-size:13px;color:var(--mut)}
+nav .links a:hover{color:var(--acc)}
+.badge{display:inline-block;font-size:12px;border:1px solid var(--acc);color:var(--acc);border-radius:20px;padding:3px 14px;margin-bottom:18px;letter-spacing:.5px}
+header.hero{padding:96px 0 70px;text-align:center}
+.hero h1{font-size:clamp(40px,7vw,72px);font-weight:900;letter-spacing:-1px}
+.hero h1 .g{background:linear-gradient(90deg,var(--acc),var(--acc2),var(--vio));-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p.sub{color:var(--mut);font-size:17px;max-width:720px;margin:18px auto 8px}
+.hero p.sub b{color:var(--txt)}
+.ver{font-size:12px;color:var(--mut);margin-bottom:28px}
+.ver code{background:#16202f;border:1px solid var(--line);border-radius:6px;padding:2px 8px;color:var(--acc2);font-size:12px}
+.btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:10px}
+.btn{padding:13px 30px;border-radius:10px;font-weight:700;font-size:15px;border:1px solid var(--acc);transition:.2s}
+.btn.fill{background:var(--acc);color:#04120c}
+.btn.fill:hover{box-shadow:0 0 24px rgba(0,229,160,.45);transform:translateY(-2px)}
+.btn.ghost{color:var(--acc);background:transparent}
+.btn.ghost:hover{background:rgba(0,229,160,.1)}
+.stats{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:36px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 22px;font-size:13px;color:var(--mut)}
+.stat b{display:block;font-size:22px;color:var(--acc)}
+section{padding:56px 0}
+h2.sec{font-size:26px;margin-bottom:6px}
+h2.sec span{color:var(--acc)}
+p.secsub{color:var(--mut);font-size:14px;margin-bottom:26px}
+.arch{background:#0c1220;border:1px solid var(--line);border-radius:14px;padding:28px;overflow-x:auto;font-size:12.5px;line-height:1.5;color:#a9f5d6;white-space:pre}
+.arch .hl{color:var(--warn)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px;transition:.2s}
+.card:hover{border-color:var(--acc);transform:translateY(-3px)}
+.card .ic{font-size:26px}
+.card h3{margin:10px 0 8px;font-size:16px}
+.card p{color:var(--mut);font-size:13.5px}
+.card code{color:var(--acc2);font-size:12px}
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;counter-reset:step}
+.step{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
+.step h3{font-size:15px;margin-bottom:12px;color:var(--acc)}
+pre{background:#070b12;border:1px solid var(--line);border-radius:10px;padding:16px;overflow-x:auto;font-size:12.5px;color:#c8f5e2}
+pre .c{color:#5b6b82}pre .k{color:var(--acc2)}pre .s{color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:13px;background:var(--card);border-radius:14px;overflow:hidden}
+th,td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--line)}
+th{color:var(--acc);font-size:12px;text-transform:uppercase;letter-spacing:1px}
+td.m{color:var(--mut)}td code{color:var(--acc2);font-size:12px}
+.note{background:rgba(255,180,84,.07);border:1px solid rgba(255,180,84,.4);border-radius:14px;padding:22px 24px;font-size:14px}
+.note b{color:var(--warn)}
+.note code{color:var(--warn);font-size:12.5px}
+footer{border-top:1px solid var(--line);padding:28px 0;text-align:center;color:var(--mut);font-size:13px}
+@media(max-width:640px){nav .links{display:none}section{padding:40px 0}}
+</style>
+</head>
+<body>
+<div class="bg"></div>
+<nav><div class="wrap">
+<div class="logo">◈ <b>Ark</b> Web</div>
+<div class="links"><a href="#arch">Architecture</a><a href="#features">Features</a><a href="#quickstart">Quickstart</a><a href="#endpoints">Endpoints</a><a href="#security">Security</a></div>
+</div></nav>
+
+<header class="hero"><div class="wrap">
+<div class="badge">● v2.8.2 · MV3 + Node Bridge · CI passing</div>
+<h1>Ark <span class="g">Web</span></h1>
+<p class="sub"><b>Let AI agents drive your real browser</b> — the one with your logins and real fingerprint. No Puppeteer, no shadow instance. 真实浏览器 · 真实点击 · 视觉原生。</p>
+<div class="ver"><code>Chrome extension (CDP)</code> + <code>Bridge Server :9333 / WS :9334</code> + <code>117 HTTP endpoints</code></div>
+<div class="btns">
+<a class="btn fill" href="https://github.com/AEBT01/ark-web" target="_blank" rel="noopener">★ View on GitHub</a>
+<a class="btn ghost" href="#quickstart">⚡ Quickstart →</a>
+</div>
+<div class="stats">
+<div class="stat"><b>117</b>HTTP endpoints</div>
+<div class="stat"><b>30+</b>audit dimensions</div>
+<div class="stat"><b>&lt;5ms</b>snapshot cache hit</div>
+<div class="stat"><b>20/20</b>v3 · 12/12 v4 tests</div>
+</div>
+</div></header>
+
+<div class="wrap">
+<section id="arch">
+<h2 class="sec"><span>◆</span> Architecture 架构</h2>
+<p class="secsub">Extension speaks CDP to the page, Server fans out HTTP to the world. 插件管浏览器，Server 管协议。</p>
+<div class="arch">┌──────────────────┐      <span class="hl">WebSocket :9334</span>      ┌────────────────────┐      <span class="hl">HTTP :9333</span>      ┌───────────────────┐
+│  <span class="hl">Chrome 插件</span>     │ ◄──────────────────► │  <span class="hl">Bridge Server</span>    │ ◄────────────────► │  <span class="hl">AI / CLI / curl</span> │
+│  extension/      │   CDP via debugger   │  server/ (Node)      │   117 endpoints    │  browser-client.js│
+│  • background CDP│                      │  • HTTP API + cache  │                    │  ark.js alias     │
+│  • content monitor│                     │  • keep-alive / queue│                    │  SKILL.md manual  │
+└──────────────────┘                      └────────────────────┘                      └───────────────────┘</div>
+</section>
+
+<section id="features">
+<h2 class="sec"><span>◆</span> Features 六大能力</h2>
+<p class="secsub">Speed (v8 keep-alive + cache + batch DAG) × Vision (snapshot + SoM) × Safety (isolation + audit).</p>
+<div class="grid">
+<div class="card"><div class="ic">👁️</div><h3>Vision Snapshot 视觉快照</h3><p>Atomic screenshot + Set-of-Marks coordinate anchors in one call. Multimodal models click by coordinates — no selectors. <code>GET /snapshot?annotate=1</code> · binary mode saves 33%.</p></div>
+<div class="card"><div class="ic">🔌</div><h3>117 Endpoints 全量控制</h3><p>Navigate, trusted mouse/keyboard, React-safe fill, screenshots &amp; PDF, cookies, storage, console, waits, batch DAG. <code>POST /act</code> finishes intent in 1 RTT. 一次 HTTP 即意图。</p></div>
+<div class="card"><div class="ic">🧊</div><h3>Session Isolation 会话隔离</h3><p>Server-enforced per-tab queues + ALS isolation. Parallel agents share one browser without stepping on each other. 多智能体并行不串台。</p></div>
+<div class="card"><div class="ic">🛡️</div><h3>Audit Engine 审计引擎</h3><p><code>POST /audit</code> scores 30+ dimensions (Vitals / a11y / SEO / security / resources) 0–100 with root-cause insights, HTML reports, JSONL trends &amp; budgets.</p></div>
+<div class="card"><div class="ic">⛓️</div><h3>Batch Chain 批量链式</h3><p><code>POST /batch</code> DAG runs multi-step flows in one round-trip; <code>chain "open …" "wait-load" "screenshot"</code> in CLI. 长链一次往返，3–5× faster.</p></div>
+<div class="card"><div class="ic">📱</div><h3>Device Emulation 设备模拟</h3><p>Real CDP emulation: devices, media queries, geo mock, network conditions, auto-dark, JS toggle, CSP bypass. <code>POST /device /media /geo</code>.</p></div>
+</div>
+</section>
+
+<section id="quickstart">
+<h2 class="sec"><span>◆</span> Quickstart 三步上手</h2>
+<p class="secsub">2 minutes from zero to AI-driven browser. Windows 用 <code>start.bat</code>，macOS/Linux 用 <code>./start.sh</code>。</p>
+<div class="steps">
+<div class="step"><h3>1 · Load the extension 安装插件</h3><pre><span class="c"># chrome://extensions → Developer mode</span>
+<span class="c"># Load unpacked → extension/</span>
+<span class="c"># Click icon → "Enable Debug" (Chrome 136+)</span></pre></div>
+<div class="step"><h3>2 · Start the bridge 启动服务</h3><pre><span class="c"># Windows</span>
+start.bat
+<span class="c"># macOS / Linux</span>
+./start.sh</pre></div>
+<div class="step"><h3>3 · Drive it 操控浏览器</h3><pre><span class="k">curl</span> http://localhost:9333/status
+<span class="k">curl</span> -X POST http://localhost:9333/open \
+  -d <span class="s">'{"url":"https://example.com"}'</span>
+<span class="k">curl</span> <span class="s">"http://localhost:9333/snapshot?annotate=1"</span></pre></div>
+</div>
+</section>
+
+<section id="endpoints">
+<h2 class="sec"><span>◆</span> Endpoints 速览</h2>
+<p class="secsub">117 endpoints, checked by <code>scripts/check-endpoints.js</code> in CI. All accept <code>?tabId=</code> / <code>?session=</code>.</p>
+<table>
+<tr><th>Group</th><th>Endpoints</th><th>Try</th></tr>
+<tr><td>👁️ Vision</td><td><code>GET /snapshot · /snapshot/binary · /screenshot · /screenshot/full · /pdf</code></td><td class="m">annotate=1 → SoM anchors</td></tr>
+<tr><td>🖱️ Interact</td><td><code>POST /act · /click · /fill · /type · /hover · /drag · /key · /scroll</code></td><td class="m">trusted CDP input</td></tr>
+<tr><td>⛓️ Flow</td><td><code>POST /batch · /open · /wait-for-* · /evaluate · /fast/*</code></td><td class="m">chain in one RTT</td></tr>
+<tr><td>📊 Observe</td><td><code>GET /full · /page-info · /dom · /console · /network · /performance · /vitals</code></td><td class="m">1–5s cache, ?fresh=1</td></tr>
+<tr><td>🛡️ Audit</td><td><code>POST /audit · /audit/run · GET /audit/status/&lt;id&gt; · /history</code></td><td class="m">0–100 + HTML report</td></tr>
+<tr><td>📱 Emulate</td><td><code>POST /device · /media · /geo · /network/conditions · /auto-dark</code></td><td class="m">iPhone 14, dark, offline…</td></tr>
+</table>
+</section>
+
+<section id="security">
+<h2 class="sec"><span>◆</span> Security 安全说明</h2>
+<div class="note"><b>⚠ Localhost-only by design, no auth. 仅限本机调试：</b> Bridge Server binds <code>localhost:9333</code> / WS <code>:9334</code> with <b>no authentication</b> — any local process can fully drive your browser. Never expose the ports, never run in untrusted environments. 请勿将端口暴露到局域网/公网。</div>
+</section>
+</div>
+
+<footer>◈ Ark Web v2.8.2 · <a href="https://github.com/AEBT01/ark-web">AEBT01/ark-web</a> · MIT · AI 手册见仓库 <code>SKILL.md</code></footer>
+</body>
+</html>

@@ -1,11 +1,20 @@
 # Ark Web
 
+> [English](README.en.md) | 中文（本页） | [Live demo](docs/index.html)
+>
+> Control your **real** Chrome from AI — 122 endpoints, snapshot/SoM vision, session isolation, audit engine.
+
+[![version](https://img.shields.io/badge/version-v2.9.3-blue)](https://github.com/AEBT01/ark-web)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![stars](https://img.shields.io/github/stars/AEBT01/ark-web?style=social)](https://github.com/AEBT01/ark-web)
+[![last-commit](https://img.shields.io/github/last-commit/AEBT01/ark-web)](https://github.com/AEBT01/ark-web/commits)
+
 > AI 浏览器调试桥接 — 浏览器扩展 + Bridge Server + HTTP API = 真实浏览器控制
 > 支持 Chrome 及 **夸克等 Chromium 内核套壳浏览器**（夸克实测可用，插件会如实上报真实内核）
 
 ## English
 
-**Ark Web** is a local bridge that lets AI agents control your *real* browser — the one you actually use, with your logins and real fingerprint. No puppeteer, no separate browser instance. An MV3 Chrome extension (CDP via `chrome.debugger`) connects over WebSocket to a local Node bridge exposing 117 HTTP endpoints: navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, an atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced session isolation for parallel agents, and a 30+ rule weighted audit engine (performance / a11y / SEO / security / resources).
+**Ark Web** is a local bridge that lets AI agents control your *real* browser — the one you actually use, with your logins and real fingerprint. No puppeteer, no separate browser instance. An MV3 Chrome extension (CDP via `chrome.debugger`) connects over WebSocket to a local Node bridge exposing 122 HTTP endpoints: navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, an atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced session isolation for parallel agents, and a 30+ rule weighted audit engine (performance / a11y / SEO / security / resources).
 
 ```bash
 ./start.sh                 # Windows: start.bat   (or: cd server && npm install && node bridge-server.js)
@@ -56,7 +65,7 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
 │   Chrome 插件        │ ◄──────────────► │   Bridge Server     │ ◄──────────► │   AI / CLI / curl   │
 │   (extension/)      │   ws://9334      │   (server/)         │   :9333      │                     │
 │                     │                  │                     │              │  browser-client.js  │
-│  • background: CDP  │                  │  • HTTP API (117)   │              │  ark.js (别名)      │
+│  • background: CDP  │                  │  • HTTP API (122)   │              │  ark.js (别名)      │
 │  • content: 日志监控│                  │  • 日志聚合          │              │  直接 HTTP          │
 │  • popup: 授权+状态 │                  │  • 缓存/keep-alive  │              │                     │
 └─────────────────────┘                  └─────────────────────┘              └─────────────────────┘
