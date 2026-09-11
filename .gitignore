@@ -23,6 +23,9 @@ client/*.pdf
 # 构建产物
 dist/
 
+# 同步备份(scripts/sync.js 生成, 不入库)
+.sync-backup-*/
+
 # 历史归档(不再使用)
 legacy/
 

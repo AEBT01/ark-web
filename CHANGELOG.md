@@ -2,6 +2,180 @@
 
 版本号以 `extension/manifest.json` 的 version 为准。
 
+## v2.9.3 (2026-09-11) — 真实站点健壮性修复：挂起资源 / 陈旧读值 / 夸克视口残留（冒烟 94/94 · v3 20/20 · v4 12/12）
+
+> 背景：v2.9.2 冒烟残留 2 项失败（`/clear` 假失败、`device/clear` 恢复视口），真实站点终测又暴露 IANA 页面加载挂起、必应结果卡时序等问题。逐一定位根因后修复，三项测试全绿。
+
+### 真实站点关键修复（本次核心）
+
+- **`wait-for-load` 停滞宽限（真实站点头号问题）**: 页面引用的第三方资源可能永久挂起（实测 IANA 首页的 `cse.google.com/cse.js` 在国内网络无响应），`load` 事件永不触发、`readyState` 卡在 `interactive`，旧实现会一直空等到超时。现在 DOM 就绪后超过 `stallGrace`(默认 3000ms) 仍无 complete 即按**部分完成**返回（`partial:true` + `readyState` + `note` 说明原因），页面立即可操作
+- **服务端等待端点超时跟随 body**: `/wait-for-load|url|text|selector` 与 `clickRef` 的 `waitFor` 后置等待，cmd 超时改为跟随请求的 `timeout`/`waitTimeout`（+5s 余量，上限 300s）——此前客户端请求 40s 等待会被服务端默认 20s 掐断
+- **陈旧读值修复（server inflight 合并 bug）**: 同键只读请求合并时，已完成请求在 10ms 窗口内仍被后续串行请求复用 → 表现为 `/value` 读到旧值、`fill→value→clear→value` 链路假失败。改为 resolve 后立即清理合并条目
+
+### 夸克（Quark）内核适配
+
+- **`device/clear` 视口残留修复**: 夸克下 `Emulation.clearDeviceMetricsOverride` 可能不还原宽高（实测带 `<meta viewport>` 的页面首次 clear 残留 390×844，UA/dpr 已恢复）。改为**软还原**：clear 后探测到残留则用 `setDeviceMetricsOverride` 写回 set 前记录的原始视口；记录缺失/写回失败则虚拟视口兜底。**不使用 detach→attach**（无用户手势会导致 CDP 授权失效 → throttled 降级，实测会引发后续命令异常）
+- **最小化窗口异常视口识别**: 夸克最小化时上报 45×14 等异常小值（而非 0），虚拟视口兜底条件从"等于 0"扩展为"任一维 <100" → 最小化时快照/点击/截图依然可用
+
+### 测试工具链修复
+
+- **`real-scenario-v3.js` headers 重复键（全部请求丢令牌）**: `http.request` 对象里出现两个 `headers` 键，后者覆盖前者 → 带令牌的请求头被丢弃（启用鉴权的环境必然 401）。已合并为单键
+- **`smoke-test.js` 失败详情输出**: `/clear`、`device/clear` 失败时打印响应体与轮询序列（此前只给 `false`，无法定位）
+- **`smoke-test.js` 最小化语义适配**: 窗口不可见时接受虚拟视口语义；插件做了视口修复（响应含 `viewportRestore`）且视口可用即通过
+- **v4 S24 不可滚动页面适配**: IANA 首页在小视口下内容不足一屏（实测 2560×1210 视口下仅 ~903px），scroll-by 为无操作成功 → 无可滚动空间时不再断言位置变化
+- **v3 S01 必应结果卡轮询**: 结果页答案卡与标准卡渲染有先后，单次查询偶发落空 → 8s 轮询等待 `.b_algo h2`
+- **`sync.js` 备份修复**: 原实现只备份顶层文件，目录内文件（extension/server/scripts…）变更从不备份却仍打印"已备份" → 改为递归备份被覆盖文件，且仅在确有备份时提示
+
+### 验证（本机夸克 7.1.7 + 真实站点）
+
+- 冒烟测试 **94/94**、real-scenario-v3 **20/20（201 步）**、real-scenario-v4 **12/12（106 步）** ✓
+- IANA 首页（挂起资源）: `wait-for-load` 3.1s 返回 `partial:true` 并给出原因说明，页面立即可操作 ✓
+- `device → clear → device → clear` 连续切换（mobile:true/false、带/不带 viewport meta）视口均正确还原 ✓
+- `/value` 连续读值不再陈旧（D0→D1→D2→D3 实时）✓
+
+## v2.9.2 (2026-09-11) — 新环境接入修复：僵尸连接自愈 + 文档令牌路径全面勘正 + 夸克内核识别
+
+> 背景：其他 AI 加载本 skill 后无法使用。排查确认两个独立原因：① **文档里的令牌路径已过期**（15 处仍写 `server/.ark-token`，而令牌早已迁到 `~/.ark-web/token`）→ 按文档取令牌必然 401；② **僵尸连接**（`connected:true` 但所有命令 20s 超时）。
+
+### 僵尸连接自愈（`server/bridge-server.js`）
+
+**症状**：`GET /status` 显示 `connected: true`，但 `tabs`/`snapshot`/任何命令都超时。
+**根因**：插件重载（或浏览器睡眠/唤醒）后，旧 WebSocket 仍留在 `clients` 且 `readyState=OPEN`，但旧实例已不再处理消息；`sendToPlugin` 只按"版本号最高"选连接，一旦选中僵尸就石沉大海。
+
+- **超时自动换连接重试**: 多连接时首个连接只用 8s 探测超时，无响应立刻换下一个连接重试（单连接保持完整超时，避免误杀合法的慢命令）
+- **可疑连接降权**: 超时过的连接 30s 内排在候选末尾（`suspectUntil`）
+- **心跳清理**: 每 15s ping，连接静默 >120s 直接 `terminate` 并移出（原实现只发 ping，从不清理）
+- **健康可观测**: `/status` 新增 `connections[]`（`version/browser/idleMs/suspect/timeouts`），多连接时给出 `connectionNote`
+- **心跳响应**: `handlePluginMessage` 新增 `ping`/`pong` 分支（原来插件的 15s 心跳会落到 `default` 打印"未知消息类型"，污染日志）
+- 超时错误文案补充第 ④ 条可能原因（浏览器后台休眠）与处置建议
+
+### 新环境零门槛接入
+
+- **`GET /health` 升级为自解释端点**（仍免鉴权）：返回 CLI 绝对路径、令牌文件位置、鉴权头名、推荐用法与文档索引 —— 新接入的 AI 一调用就知道该用什么命令、令牌在哪，无需猜路径
+- **插件上报真实内核**（`extension/background.js`）: 新增 `detectKernel()`，按 UA 识别 `quark`(夸克) / `edge` / `brave` / `chrome` / `chromium`，替换原先写死的 `'chrome'`。`/status` 的 `plugin.browser` 现在能如实反映（本机实测显示 `quark`）
+
+### 文档勘正（这是本次"用不了"的直接原因）
+
+- **令牌路径全量修正**: `SKILL.md` / `README.md` / `references/troubleshooting.md` 中的 `server/.ark-token` 全部改为 **`~/.ark-web/token`**（Windows `%USERPROFILE%\.ark-web\token`），并在原处保留一句"旧路径已废弃"提示，避免旧文档继续误导
+- **`SKILL.md` 新增 §0「开工前自检」**: 三条铁律（先 cd 到 skill 目录 / 优先用 CLI 自动带令牌 / 令牌真实位置）+ 三步验证命令 + **连接异常速查表**（401、未连接、僵尸连接、部分命令超时、需 CDP、夸克差异）
+- **`references/troubleshooting.md` 新增两节**: 「僵尸连接」（症状/根因/自愈机制/处置命令/curl 查看方式）与「夸克 / 非 Chrome 内核」（已知 CDP 差异、最小化窗口行为、如何确认当前内核）
+- **README 新增「其他 AI / 新环境接入要点」**: 5 条必读（cd 目录、优先 CLI、令牌位置、僵尸连接、夸克支持）；英文段补 `New here?` 一句话指引；故障排查表扩充（401 / 僵尸连接 / 插件版本不一致 / 夸克差异 / 截图超时），并去掉"仅 Chrome"的表述
+- `references/protocol.md` 补 `--tabId` 全局参数与令牌自动读取说明
+- 端点计数 119 → **122**（新增 `/snapshot/text`、`/wait-for-stable`、`/reload-extension`）
+
+### 验证（本机夸克 + 真实站点）
+
+- `/health` 返回 CLI 绝对路径与令牌位置 ✓；无令牌访问 `/status` 正确返回 401 ✓
+- 重启 server 后残留僵尸连接被清理，`tabs`/`snapshot` 等命令全部恢复正常 ✓
+- 插件上报 `browser: "quark"` ✓（原为硬编码 `chrome`）
+- `debug-on` 重新授权 CDP 成功（3 个标签页 attach），无需点击 popup ✓
+
+
+
+## v2.9.1 (2026-09-10) — 多副本治理 + 稳定性修复 + 效率实测（真机验证）
+
+> 本次全部改动都在真实 Chrome + 真实站点上端到端验证：冒烟 **94/94 通过**，视觉闭环演示 8/8 步通过。
+
+### 多副本治理（"改了半天不生效"的根因）
+
+- **根因**: 机器上存在 3 份项目副本，而 Chrome/Quark 从 `C:\Users\画扇\browser-debug-extension\extension` 加载旧代码，改 skill 目录永远不生效
+- **`scripts/doctor.js`（新）**: 一键体检 —— 扫描所有副本并做关键文件指纹比对、从 Chrome/Quark 用户数据读出**浏览器实际加载路径**、问 `/status` 拿**插件上报版本**，给出结论与修复动作（漂移/版本不一致会 exit 1）
+- **`scripts/sync.js`（新）**: 把当前目录同步到"浏览器实际加载的那份副本"，同步前自动备份到 `.sync-backup-<时间戳>/`；`--dry-run` 预览
+- **`POST /reload-extension`（新）**: 插件自我重载（`chrome.runtime.reload()`），改完 `extension/` 后无需再手动点浏览器按钮；重载后 CDP 授权失效，但 `POST /debug/attach-all` 可再次授权（实测无需点击 popup）
+- **`/status` 新增 `plugin` 段**（版本/浏览器/注册时间）与 `security.tokenFile`：一眼看出"浏览器里跑的是哪一版代码"
+- **令牌改为用户级共享路径** `~/.ark-web/token`（旧 `server/.ark-token` 仍兼容并自动补齐），消除多副本令牌不一致导致的 401
+
+### 稳定性与正确性修复（均由真机实测暴露）
+
+- **`wait-for-load` 导航竞态**: 旧实现"当前文档已 complete 就返回"会把**上一个文档**当成加载完成（实测 `open` 后拿到 `about:blank`）。现引入导航标记（`_pendingNav`）+ `afterAction`：必须观察到新文档进入 loading 或 URL 变化才判定完成，响应带 `transition` 字段说明依据
+- **`clickRef` 后置等待过严**: 快速导航可能在两次轮询间完成（看不到 loading）→ 现在用"基线 URL 变化"兜底；点击不跳转时约 1.5s 后按 `no-transition` 返回，不再空等 15s 超时
+- **最小化窗口截图超时（关键）**: 窗口不可见时 CDP 从合成器取帧永远等不到新帧 → 整屏截图改走 `fromSurface:false`（**直接从渲染进程出图**）。实测同页快照采集从 **10233ms → 457ms**，且不再失败。注意：带 `clip` 的截图（`zoom`/`screenshot-element`）内核强制要求 surface，故只能重试（内核会回 `Only screenshots from surface are allowed`）
+- **`captureVisibleTab` 兜底不再崩**: 该 API 只接受 jpeg/png，传 webp 会直接抛参数错误 → 兜底路径自动降级为 jpeg 并在响应里给 `formatNote`
+- **`device/clear` 幂等化**: 反复 clear（无 override 可清）不再因自愈校验失败而返回 `success:false`；清除后若视口坍缩（窗口不可见）会等一拍再判定并施加虚拟视口，保证 tab 仍可用于视觉采集
+- **出错页守卫**: `chrome-error://` / `about:blank` / `chrome://` 页面提前识别并返回可操作错误（旧实现会让 `Runtime.evaluate` 空等 12s）
+- **插件内部方法名错误修复**: `ensureViewport` / `waitForStable` / `zoomShot` 误用 `this.evaluate`（ArkWeb 上不存在）→ 改为 `evaluateJS`；此前导致虚拟视口与 zoom 静默失效
+- **`ArkWeb` 上的 `normalizeImageFormat`** 统一图片格式（png/jpeg/webp），`screenshot`/`screenshotFull` 也统一走它（避免 `image/jpg` 这类错误 MIME）
+
+### 能力增强
+
+- **虚拟视口自动兜底（新）**: 检测到目标 tab `innerWidth===0`（窗口最小化/不可见）时自动施加 1440×900 `Emulation.setDeviceMetricsOverride`（仅作用于该 tab，不改动用户窗口），响应带 `autoViewport`。使快照/点击/截图在**窗口最小化时依然可用**
+- **`POST /wait-for-stable {timeout,quiet}`（新）**: DOM 连续静默 + `readyState=complete` 才返回，替代固定 sleep；快照也可用 `settle=1` 一步到位
+- **紧凑快照（新）** `compact=1`: 元素由对象变定长数组 `[ref,tag,role,x,y,w,h,flags,label]`，`flags` 用字母表达 `disabled/checked/occluded/非视口/已填值`
+- **元素折叠**: `<button><span>文字</span>` 这类嵌套不再重复收录（非主要交互标签若祖先已收录则跳过），减少噪声与 token
+- **`POST /snapshot/text`（新）**: 可见文本块 + 紧致坐标（用 `Range` 取文本节点自身盒子）+ 字号 —— **不截图就能"读"页面**
+- **`POST /act {action:"find", text}（新）**: 按可见文本找元素，可点击优先排序、去重，返回 ref/坐标/是否可点
+- **`POST /act {action:"refs", steps:[...]}（新）**: 一次 HTTP 批量 ref 动作（click/hover/fill/read）
+- **`--tabId` 全局 CLI 参数（新）**: 所有请求自动带 `?tabId=`，多标签/多窗口下确定性定位
+- **CLI 新增命令**: `act`（通用高层动作）、`find`、`text-map`、`refs`、`click-ref`、`hover-ref`、`fill-ref`、`read-text`、`zoom`、`wait-stable`、`reload-extension`
+
+### 效率实测（百度首页，1440×900，34→26 元素）
+
+| 方式 | 元素 JSON | 估算 token | 图片 base64 | 采集耗时 |
+|---|---|---|---|---|
+| 对象格式 png | 7.8 KB | ~2226 | 428.2 KB | 3265ms |
+| **紧凑格式 webp** | **1.5 KB** | **~429** | **134.0 KB** | 382ms |
+
+**元素 JSON -80.7% / 图片 -68.7% / 单次总载荷 -68.9%**；snapshot 400ms 缓存命中 2ms。
+（复现: `node scripts/bench-snapshot.js --max 60`）
+
+### 新增脚本
+
+- `scripts/doctor.js` 环境自检 · `scripts/sync.js` 多副本同步 · `scripts/bench-snapshot.js` 快照效率基准 · `scripts/demo-vision-flow.js` 视觉闭环参考实现（8 步全流程演示，可直接照抄）
+
+### 测试
+
+- `smoke-test.js` 修正 `/device/clear` 恢复断言：窗口不可见时"恢复到 0"没有意义，接受"清除成功且给出可用视口"；真机 **94/94 通过**
+
+
+
+## v2.9.0 (2026-09-10) — 安全加固 + 视觉能力增强 + 手册改为视觉单路径
+
+### 安全（P0 修复）
+
+- **令牌鉴权（`server/bridge-server.js`）**: 全部端点（除免鉴权存活探针 `GET /health`）要求 `X-Ark-Token` 头 / `Authorization: Bearer` / `?token=`。令牌首次启动用 `crypto.randomBytes(24)` 生成、以 0600 权限写入 `server/.ark-token`，之后固定复用；也可用 `ARK_TOKEN` 指定。常量时间比较（sha256 + `timingSafeEqual`）。`ARK_NO_AUTH=1` 可显式关闭（日志会警告）
+  - 修复：此前 `/evaluate` 等任意端点对**任意网页**开放 —— 恶意页面可用 `fetch` 直接驱动本机浏览器并读取响应（结合 `ACAO: *` 可读结果），等于把用户全部登录态交给网页
+- **移除 `Access-Control-Allow-Origin: *`**: 改为按来源**精确回显** + `Vary: Origin`；非白名单来源直接 403
+- **Origin 校验**: 仅接受无 Origin（CLI/curl）、`chrome-extension://` 等扩展页面、本机页面来源
+- **Host 校验**: 拒绝非回环 Host（挡 DNS rebinding）
+- **仅回环监听**: HTTP 与 WS 均 `listen(port, '127.0.0.1')`。此前 `listen(port)` 未传 host 实际绑 `0.0.0.0`，局域网可达，与文档"仅本机"不符。确需对外用 `BRIDGE_HOST=0.0.0.0`（并必须设 `ARK_TOKEN`）
+- **WS 令牌**: 设置 `ARK_TOKEN`/`ARK_WS_TOKEN` 后，插件连接必须携带相同令牌，否则 `close(4001)` —— 堵住"本机进程直连 9334 绕过 HTTP 鉴权"的旁路
+- **启动安全横幅**: 打印监听地址、Host/Origin 状态、令牌、WS 令牌是否启用，风险项以 warn 输出
+- 新增 `server/.ark-token` 到 `.gitignore`（令牌绝不入库）
+
+### 视觉能力增强（多模态优先）
+
+- **ref 系操作（新）**: 快照采集时给每个元素打 `[data-ark-ref="N"]` 临时标记，新增插件命令 `click-ref` / `hover-ref` / `fill-ref` / `read-text` / `zoom-shot`，经 `POST /act {action:"clickRef"|"hoverRef"|"fillRef"|"readText"|"zoom"}` 暴露。**编号直接可用，无需坐标换算，滚动/位移/遮挡变化后依然准确**；标记在下次快照与 `/reset-all` 时统一清除
+- **裁剪放大（新）**: `POST /snapshot/zoom {ref|selector|x,y,width,height, scale(1-5), format}` —— CDP `Page.captureScreenshot` + `clip.scale` 局部放大，用于读小字/图表细节；CDP 不可用时降级为元素截图并附 `degraded` 说明
+- **元素语义增强**: 快照元素新增 `disabled` / `checked` / `inputType` / `value`（password 不回传）/ `placeholder` / `href` / `expanded` / `inViewport` / `occluded`，且**仅在非默认值时输出**以控制 token；`occluded` 用 `elementFromPoint` 判定"点了会打到遮罩"
+- **webp 支持**: `format=webp`（`/snapshot`、`/snapshot/zoom`、`/snapshot/binary` 的 Content-Type 同步），比 png 更省 token
+- `/reset-all` 新增 `visionRefs` 清理项：移除 SoM 叠加层与 `data-ark-ref` 标记
+
+### 插件配置
+
+- WS 主机/端口/令牌改为可从 **popup →「工具」→「连接配置」** 修改并持久化到 `chrome.storage.local`（`arkWsHost`/`arkWsPort`/`arkWsToken`），保存后自动重连；`chrome.storage.onChanged` 监听外部修改。修复"WS 端口硬编码 9334，改端口必须改源码"的技术债
+- 新增 popup 消息 `get-config` / `set-config`
+
+### 客户端与脚本
+
+- **修复 `client/ark-fast.js` 的 `baseUrl` 参数被忽略**（`BrowserClient` 只认 host/port，旧代码传 `baseUrl` 静默失效）→ 现在会解析 URL 取 host/port
+- `BrowserClient` 新增令牌与连接解析 `resolveConnection()`：优先级 显式参数 > `ARK_PORT`/`ARK_HOST`/`ARK_TOKEN` > `server/.ark-token` 文件 > 默认值；所有请求自动带 `X-Ark-Token`；401 附带可操作的 hint
+- CLI 新增全局参数 `--port` / `--host` / `--token`（此前文档承认不支持，是自相矛盾项）；新增命令 `click-ref` / `hover-ref` / `fill-ref` / `read-text` / `zoom`，并补 `TYPE_MAP` 与 chain 步骤解析
+- `ArkFast` 新增 `clickRef` / `hoverRef` / `fillRef` / `readText` / `zoom`
+- 测试脚本（smoke-test / benchmark / real-scenario-v3/v4 / exec-actions）统一改用 `resolveConnection()` 自动读令牌与端口
+
+### 文档
+
+- **`SKILL.md` 重写为 v10「视觉优先」单路径**：移除模型自检门与文本选择器工作流，改为「快照 → 按编号操作」为主线；新增 ref 操作、zoom/readText、元素语义字段表、安全模型三节
+- **渐进式披露拆分**: `references/protocol.md`（完整端点表 + chain/batch + 命令映射）、`references/troubleshooting.md`（故障排查）、`references/evaluate-recipes.md`（evaluate 穿透模板），`SKILL.md` 只保留主路径与索引
+- 新增端点 `GET /health`（免鉴权）与 `POST /snapshot/zoom`；`/status` 增加 `security` 段（host/tokenAuth/tokenSource/wsTokenRequired）
+- README 同步：安全模型表、ref/zoom 示例、目录结构、端点总览（119）
+
+### 补充（供人工处理，未自动执行）
+
+- 目录内的 `browser-debug-extension` **Junction**（指向 `%USERPROFILE%\browser-debug-extension`）仍存在，会导致递归工具报"不受信任的装入点"、打包/分享时携带外部目录引用。建议手工 `rmdir` 该链接（只删链接不动目标）
+
+
+
 ## v2.8.2 (2026-08-29) — T0 修复与完善 (真实 bug × 5 + 跨平台 + 文档)
 
 - **screenshot 串页修复** (`extension/background.js`): 目标为后台标签页的 `http://127.0.0.1/localhost` 页面时, 旧逻辑走 `captureVisibleTab` —— 它永远截【当前激活 tab】, 会把用户正在看的页面截走(串页+隐私)。现仅当目标 tab 就是激活 tab 才走快路径; 后台 tab 一律 CDP 精准截图, 且兜底路径在"目标≠激活 tab"时返回结构化错误而非静默截错页。`/snapshot` 内部复用 `screenshot` 同步受益

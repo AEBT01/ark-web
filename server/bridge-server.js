@@ -16,14 +16,40 @@
 
 const WebSocket = require('ws');
 const http = require('http');
+const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { AsyncLocalStorage } = require('async_hooks');
 const auditEngine = require('./audit');
 const auditReport = require('./audit-report');
+
+// 令牌文件: 首次启动自动生成并落盘(权限 0600), 之后固定复用 —— CLI/脚本据此自动带上 X-Ark-Token
+// 目录里可能同时存在多份项目副本(开发仓库 / 技能安装目录), 各自生成令牌会导致"服务端与 CLI 令牌不一致"的 401。
+// 因此令牌默认落在用户级共享路径, 所有副本读同一个文件; 旧位置的 server/.ark-token 仍兼容读取。
+const SHARED_TOKEN_DIR = path.join(os.homedir(), '.ark-web');
+const SHARED_TOKEN_FILE = path.join(SHARED_TOKEN_DIR, 'token');
+const LEGACY_TOKEN_FILE = path.join(__dirname, '.ark-token');
+const TOKEN_FILE = SHARED_TOKEN_FILE;
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const EXTENSION_PROTOCOLS = new Set(['chrome-extension:', 'moz-extension:', 'safari-web-extension:']);
 
 class ArkWebServer {
   constructor(options = {}) {
     this.port = options.port || 9333;
     this.wsPort = options.wsPort || 9334;
+    // ============ 安全基线 ============
+    // 1) 默认只绑回环地址(127.0.0.1): 局域网其他设备无法访问, 端口不会暴露给外部
+    // 2) 默认启用令牌鉴权(X-Ark-Token): 阻止本机其他进程 / 任意网页(CSRF / DNS rebinding) 操控浏览器
+    // 3) Host / Origin 双重校验: 仅接受回环 Host 与本机页面或扩展页面来源
+    this.host = options.host || process.env.BRIDGE_HOST || '127.0.0.1';
+    const auth = this.resolveAuth(options.token);
+    this.authToken = auth.token;
+    this.authSource = auth.source;
+    this.authTokenFile = auth.tokenFile || null;
+    // WS 侧令牌: 仅在显式配置 ARK_TOKEN / ARK_WS_TOKEN 时强制(插件需在 popup 填相同令牌)
+    this.wsExpectedToken = process.env.ARK_WS_TOKEN || process.env.ARK_TOKEN || null;
+    this.wsTokenRequired = !!this.wsExpectedToken;
     this.clients = new Map();
     this.pendingRequests = new Map();
     this.requestId = 0;
@@ -59,7 +85,7 @@ class ArkWebServer {
     this.inflight = new Map(); // key -> {promise, ts}
     this.snapshotCache = new Map(); // tabKey -> {data, time}
     // 写操作类型: 命中后失效 snapshot/只读缓存
-    this.writeTypes = new Set(['click-element','hover-element','double-click','right-click','drag-element','mouse','scroll-page','scroll-into-view','scroll-by','simulate-key','type-text','fill-form','select-option','check-box','clear-field','focus-element','open-url','reload','back','forward','activate-tab','close-tab','highlight-elements','clear-highlights','evaluate','set-storage','remove-storage','clear-storage','set-cookie','remove-cookie','upload-file']);
+    this.writeTypes = new Set(['click-element','hover-element','double-click','right-click','drag-element','mouse','click-ref','hover-ref','fill-ref','zoom-shot','scroll-page','scroll-into-view','scroll-by','simulate-key','type-text','fill-form','select-option','check-box','clear-field','focus-element','open-url','reload','back','forward','activate-tab','close-tab','highlight-elements','clear-highlights','evaluate','set-storage','remove-storage','clear-storage','set-cookie','remove-cookie','upload-file']);
     // Server keep-alive 调优(v8)
     // snapshot 缓存 400ms, 高频连续 snapshot 命中 <5ms
     this.snapshotTtl = 400;
@@ -70,16 +96,29 @@ class ArkWebServer {
   // ============ 初始化 ============
 
   init() {
-    this.wss = new WebSocket.Server({ port: this.wsPort }, () => {
-      console.log(`[ArkWeb] WebSocket 服务器: ws://localhost:${this.wsPort}`);
+    this.wss = new WebSocket.Server({ port: this.wsPort, host: this.host }, () => {
+      console.log(`[ArkWeb] WebSocket 服务器: ws://${this.host}:${this.wsPort}`);
     });
 
-    this.wss.on('connection', (ws) => {
-      console.log('[ArkWeb] Chrome 插件已连接');
-      this.clients.set(ws, { connectedAt: Date.now(), version: '0.0.0' });
+    this.wss.on('connection', (ws, req) => {
+      // WS 令牌校验(仅当配置了 ARK_TOKEN / ARK_WS_TOKEN): 防止本机任意进程直连 9334 绕过 HTTP 鉴权
+      if (this.wsTokenRequired) {
+        let provided = null;
+        try { provided = new URL(req?.url || '', 'http://localhost').searchParams.get('token'); } catch { /* ignore */ }
+        if (!this.tokenEquals(provided, this.wsExpectedToken)) {
+          console.warn('[ArkWeb] 拒绝未授权 WS 连接(令牌不匹配)。请在插件 popup 填写与 ARK_TOKEN 相同的访问令牌。');
+          try { ws.close(4001, 'invalid token'); } catch { /* ignore */ }
+          return;
+        }
+      }
+      console.log('[ArkWeb] 插件已连接');
+      this.clients.set(ws, { connectedAt: Date.now(), version: '0.0.0', lastSeen: Date.now(), timeouts: 0, suspectUntil: 0 });
       this.connected = true;
 
       ws.on('message', (data) => {
+        // lastSeen 用于心跳判断连接是否僵死(僵尸连接表现为 readyState=OPEN 但不再回任何消息)
+        const info = this.clients.get(ws);
+        if (info) info.lastSeen = Date.now();
         try {
           this.handlePluginMessage(JSON.parse(data.toString()), ws);
         } catch (e) {
@@ -108,29 +147,40 @@ class ArkWebServer {
     this.server.headersTimeout = 12000;
     this.server.maxHeadersCount = 100;
     this.server.requestTimeout = 0;
-    this.server.listen(this.port, () => {
-      console.log(`[ArkWeb] HTTP 服务器: http://localhost:${this.port}`);
+    this.server.listen(this.port, this.host, () => {
+      console.log(`[ArkWeb] HTTP 服务器: http://${this.host}:${this.port}  (仅回环地址, 局域网不可达)`);
       console.log('');
       console.log('[ArkWeb] 快速开始:');
       console.log('  1. Chrome 加载 extension/ 目录的插件');
       console.log('  2. 打开插件 popup, 点击「启用调试」(Chrome 136+ 必须)');
       console.log('  3. 现在可以由 AI 或 curl 调用 API');
       console.log('');
+      this.printSecurityBanner();
       console.log(`[ArkWeb] 端点列表 (${this.listEndpoints().length} 个):`);
       this.listEndpoints().forEach(e => console.log(`  ${e}`));
     });
 
-    // 心跳(15s)
+    // 心跳(15s): 顺带清理僵死连接(僵尸连接会让后续命令全部超时, 是"服务在线但用不了"的头号原因)
     setInterval(() => {
-      for (const ws of this.clients.keys()) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+      const now = Date.now();
+      for (const [ws, info] of [...this.clients]) {
+        if (ws.readyState !== WebSocket.OPEN) { this.clients.delete(ws); continue; }
+        const idle = now - (info.lastSeen || info.connectedAt || now);
+        if (idle > 120000) {
+          console.warn(`[ArkWeb] 清理僵死连接(静默 ${Math.round(idle / 1000)}s, 版本 ${info.version || '?'})`);
+          try { ws.terminate(); } catch { /* ignore */ }
+          this.clients.delete(ws);
+          this.connected = this.clients.size > 0;
+          continue;
+        }
+        try { ws.send(JSON.stringify({ type: 'ping' })); } catch { /* ignore */ }
       }
     }, 15000);
   }
 
   listEndpoints() {
     return [
-      'GET  /status', 'GET  /tabs', 'GET  /full', 'GET  /clear-cache',
+      'GET  /health (免鉴权)', 'GET  /status', 'GET  /tabs', 'GET  /full', 'GET  /clear-cache',
       'POST /batch {steps:[{type,data}]}',
       'GET  /session', 'POST /session/create', 'POST /session/delete {sessionId, closeTabs?}',
       'POST /session/assign {sessionId,tabId}', 'POST /session/release {sessionId,tabId?}',
@@ -156,6 +206,10 @@ class ArkWebServer {
       'POST /screenshot/element {selector}',
       'GET  /snapshot?format=&annotate=&full=&compact=&maxElements=&selector=&fast=', 'POST /snapshot {format,annotate,full,compact,maxElements,selector,fast}',
       'GET  /snapshot/binary?format=&annotate=&full=&compact=&selector=&fast=',
+      'POST /snapshot/zoom {ref|selector|x,y,width,height,scale,format,quality} (裁剪放大读小字)',
+      'POST /snapshot/text {minLen,max} (可见文本块+紧致坐标, 免截图读页面)',
+      'POST /wait-for-stable {timeout,quiet} (等 DOM 稳定, 替代固定 sleep)',
+      'POST /reload-extension (重载插件代码; 重载后需重新「启用调试」)',
       'POST /fast/act {action,selector,text,fields,url,fast}', 'POST /act {action,...}',
       'GET  /fast/snapshot', 'POST /fast/click {selector,text,fast}', 'POST /fast/fill {fields}',
       'GET  /html', 'POST /html {selector}',
@@ -194,16 +248,20 @@ class ArkWebServer {
 
   // ============ 插件消息 ============
 
-  handlePluginMessage(message) {
+  handlePluginMessage(message, ws) {
     const { type, data, id } = message;
 
     switch (type) {
       case 'register':
         console.log('[ArkWeb] 插件注册:', JSON.stringify(data));
-        // 记录注册信息, 供多实例时选择最新版本
+        // 记录注册信息, 供多实例时选择最新版本; 同时暴露给 /status 便于排查"插件是否为新版代码"
         for (const [ws, info] of this.clients) {
           if (ws.readyState === WebSocket.OPEN) {
             info.version = data?.version || info.version;
+            info.browser = data?.browser || info.browser;
+            info.registeredAt = data?.timestamp || info.registeredAt;
+            // 单独记一份最近注册信息: /status 用它判断"浏览器里跑的是哪版插件代码"
+            this.lastRegistration = { version: info.version, browser: info.browser || null, registeredAt: info.registeredAt || null };
           }
         }
         break;
@@ -246,36 +304,89 @@ class ArkWebServer {
         console.log('[ArkWeb] 插件核心域状态:', JSON.stringify(data));
         break;
 
+      case 'ping':
+        // 插件心跳(每 15s): 视为存活信号, 静默回 pong, 不打印日志
+        try { ws?.send(JSON.stringify({ type: 'pong' })); } catch { /* ignore */ }
+        break;
+
+      case 'pong':
+        break;
+
       default:
         console.log('[ArkWeb] 未知消息类型:', type);
     }
   }
 
-  /** 向插件发送命令(多实例时优先选择版本最高的连接) */
+  /** 向插件发送命令。
+   *  多连接时: 优先健康连接(跳过近期超时的可疑连接), 其次版本高者。
+   *  超时后自动换下一个连接重试一次 —— 僵尸连接(插件重载/浏览器休眠后残留的旧实例)
+   *  表现为 readyState=OPEN 但永不回消息, 会让所有命令静默超时(即"服务显示已连接但用不了")。 */
   sendToPlugin(message, timeout = 20000) {
     return new Promise((resolve, reject) => {
-      let target = null;
-      let bestVer = '0.0.0';
-      for (const [ws, info] of this.clients) {
-        if (ws.readyState !== WebSocket.OPEN) continue;
-        const v = (info.version || '0.0.0').replace(/-.*$/, '');
-        if (v > bestVer) { bestVer = v; target = ws; }
-      }
-      if (!target) {
-        reject(new Error('Chrome 插件未连接。请: 1) 安装插件 2) 打开 Chrome 3) 点击插件图标确认连接'));
+      const now = Date.now();
+      const cmpVer = (a, b) => String(a || '0').replace(/-.*$/, '')
+        .localeCompare(String(b || '0').replace(/-.*$/, ''), undefined, { numeric: true });
+      const candidates = [...this.clients.entries()]
+        .filter(([ws]) => ws.readyState === WebSocket.OPEN)
+        .sort((a, b) => {
+          const sa = now < (a[1].suspectUntil || 0) ? 0 : 1;   // 近期超时的连接排到最后
+          const sb = now < (b[1].suspectUntil || 0) ? 0 : 1;
+          if (sa !== sb) return sb - sa;
+          return cmpVer(b[1].version, a[1].version);
+        })
+        .map(([ws]) => ws);
+      if (!candidates.length) {
+        reject(new Error('插件未连接。请检查: 1) 浏览器已打开 2) 已加载 extension/ 目录的插件 3) 插件 popup 显示已连接并已点「启用调试」'));
         return;
       }
-      const id = ++this.requestId;
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        const e = new Error(`插件命令超时(${timeout}ms): ${message.type} — 可能原因: ①页面有模态弹窗挂起(手动模式) ②页面渲染忙/冻结 ③CDP 授权过期`);
-        e.code = 'PLUGIN_TIMEOUT';
-        e.commandType = message.type;
-        reject(e);
-      }, timeout);
-      this.pendingRequests.set(id, { resolve, reject, timer });
-      target.send(JSON.stringify({ ...message, id }));
+      // 多连接时才用"短超时探测"(8s)尽快绕过僵尸; 单连接保持完整超时, 避免误杀合法的慢命令
+      const probeTimeout = candidates.length > 1 ? Math.min(timeout, 8000) : timeout;
+      this._sendAttempt(candidates, 0, message, timeout, probeTimeout, resolve, reject);
     });
+  }
+
+  /** 单次发送尝试; 超时/发送失败时若还有其他连接则自动换一个重试 */
+  _sendAttempt(candidates, idx, message, timeout, currentTimeout, resolve, reject) {
+    const ws = candidates[idx];
+    const id = ++this.requestId;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      this.pendingRequests.delete(id);
+      const info = this.clients.get(ws);
+      if (info) { info.timeouts = (info.timeouts || 0) + 1; info.suspectUntil = Date.now() + 30000; }
+      if (idx + 1 < candidates.length) {
+        console.warn(`[ArkWeb] 连接 #${idx + 1} 对 ${message.type} 无响应(${currentTimeout}ms), 自动换下一个连接重试(活跃连接 ${this.clients.size} 个)`);
+        return this._sendAttempt(candidates, idx + 1, message, timeout, timeout, resolve, reject);
+      }
+      const e = new Error(`插件命令超时(${timeout}ms): ${message.type} — 可能原因: ①页面有模态弹窗挂起(手动模式) ②页面渲染忙/冻结 ③CDP 授权过期 ④浏览器后台休眠(可 POST /tab/activate 激活标签页, 或在插件 popup 重新连接)`);
+      e.code = 'PLUGIN_TIMEOUT';
+      e.commandType = message.type;
+      reject(e);
+    }, currentTimeout);
+    this.pendingRequests.set(id, {
+      resolve: (d) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const info = this.clients.get(ws);
+        if (info) { info.timeouts = 0; info.suspectUntil = 0; info.lastSeen = Date.now(); }
+        resolve(d);
+      },
+      reject: (err) => { if (settled) return; settled = true; clearTimeout(timer); reject(err); },
+      timer
+    });
+    try {
+      ws.send(JSON.stringify({ ...message, id }));
+    } catch (e) {
+      clearTimeout(timer);
+      this.pendingRequests.delete(id);
+      if (settled) return;
+      settled = true;
+      if (idx + 1 < candidates.length) return this._sendAttempt(candidates, idx + 1, message, timeout, timeout, resolve, reject);
+      reject(e);
+    }
   }
 
   // v8 per-tab 串行队列: 同 tab 保序, 跨 tab 完全并行
@@ -407,8 +518,9 @@ class ArkWebServer {
       this.inflight.set(ik, entry);
       // 清理链必须先接住 rejection: p.finally() 会派生新 Promise, 若 p 被拒绝且无人消费会触发 unhandledRejection 使进程崩溃
       p.catch(() => {}).finally(() => {
-        // 保留 10ms 避免抖动, 随后清理
-        setTimeout(() => { if (this.inflight.get(ik) === entry) this.inflight.delete(ik); }, 10);
+        // resolve/reject 后立即清理(此前保留 10ms): 10ms 窗口内的串行只读请求(如 fill→value→clear→value)
+        // 会复用已完成请求的旧响应, 表现为"读到陈旧值"(冒烟 POST /clear 假失败的真凶)
+        if (this.inflight.get(ik) === entry) this.inflight.delete(ik);
       });
     }
     return p;
@@ -435,18 +547,56 @@ class ArkWebServer {
   async handleHTTPRequest(req, res) {
     this.requestCount++;
     const t0 = Date.now();
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+    // ---- 第 1 道: Host 校验(挡 DNS rebinding: 恶意域名解析到 127.0.0.1 后带自己的 Host 发请求) ----
+    const hostOk = this.isLoopbackHost(req.headers.host);
+    const origin = req.headers.origin || null;
+    const originOk = this.isAllowedOrigin(origin);
+
+    // ---- 第 2 道: CORS 头按来源精确回显, 不再使用通配 '*' ----
+    if (origin && originOk) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Ark-Token, X-Session, Authorization');
+      res.setHeader('Access-Control-Max-Age', '600');
+    }
+
+    if (!hostOk || !originOk) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        error: `403: 请求被安全策略拒绝(${!hostOk ? `Host=${req.headers.host} 非回环地址` : `Origin=${origin} 不被信任`})`,
+        hint: '仅允许 127.0.0.1/localhost 的 Host, 且来源须为本机页面或浏览器扩展页面'
+      }));
+      return;
+    }
+
+    // 预检请求不携带自定义头, 必须在令牌校验前放行(已按来源回显 CORS 头)
     if (req.method === 'OPTIONS') {
-      res.writeHead(200);
+      res.writeHead(204);
       res.end();
       return;
     }
 
     const url = new URL(req.url, `http://localhost:${this.port}`);
     const pathname = url.pathname;
+
+    // ---- 第 3 道: 令牌校验(挡本机其他进程 / 任意网页的 CSRF) ----
+    // 例外: /health 为免鉴权存活探针, 只回极简状态, 不含任何敏感数据
+    if (this.authToken && pathname !== '/health') {
+      const provided = this.requestToken(req, url);
+      if (!this.tokenEquals(provided, this.authToken)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          error: '401: 缺少或错误的访问令牌',
+          hint: `在请求头带上 X-Ark-Token(或 ?token=)。令牌见 ${this.authTokenFile || TOKEN_FILE}, server 启动日志也会打印。CLI 会自动读取并携带。`,
+          tokenFile: this.authTokenFile || TOKEN_FILE
+        }));
+        console.log(`[ArkWeb] ${req.method} ${pathname} -> 401 (令牌校验失败)`);
+        return;
+      }
+    }
+
     // 全局 tabId 参数: 所有端点支持 ?tabId=<id>
     // 请求级隔离(ALS): 并发请求的 ?tabId 互不覆盖, 修复此前的实例字段竞态
     const tabId = url.searchParams.get('tabId') ? +url.searchParams.get('tabId') : null;
@@ -498,16 +648,54 @@ class ArkWebServer {
       let result;
       switch (pathname) {
         // ============ 基础 ============
+        case '/health':
+          // 免鉴权存活探针 + 自解释用法(便于新接入的 AI 立刻知道该用什么命令、令牌在哪)
+          // 注意: 不含版本/tab/页面等实质数据; 服务仅监听回环地址, 因此返回本机路径是可接受的
+          result = {
+            ok: true,
+            connected: this.connected,
+            cli: path.join(__dirname, '..', 'client', 'browser-client.js'),
+            tokenFile: this.authTokenFile || TOKEN_FILE,
+            tokenHeader: 'X-Ark-Token',
+            usage: {
+              preferred: `node "${path.join(__dirname, '..', 'client', 'browser-client.js')}" status   (CLI 会自动读取令牌, 推荐)`,
+              http: 'HTTP 调用需带 X-Ark-Token 头; 令牌内容见 tokenFile(Windows PowerShell: Get-Content $env:USERPROFILE\\.ark-web\\token -Raw)',
+              firstChecks: ['/health(免鉴权)', '/status(需令牌)', '/tabs'],
+              docs: 'SKILL.md(视觉优先工作流) · references/protocol.md(全端点) · references/troubleshooting.md(排障)'
+            }
+          };
+          break;
+
         case '/status':
           result = {
             connected: this.connected,
             pluginConnected: this.connected,
             clients: this.clients.size,
+            // 连接健康: 有多个连接且其中存在近期超时的"可疑连接"时, 说明可能是僵尸连接残留
+            connections: [...this.clients.values()].map(i => ({
+              version: i.version || null,
+              browser: i.browser || null,
+              idleMs: Date.now() - (i.lastSeen || i.connectedAt || Date.now()),
+              suspect: Date.now() < (i.suspectUntil || 0),
+              timeouts: i.timeouts || 0
+            })),
+            ...(this.clients.size > 1 ? { connectionNote: `存在 ${this.clients.size} 个插件连接(通常 1 个); 多余的可能是插件重载后的僵尸连接, 命令超时会自动换连接重试, 120s 静默后自动清理` } : {}),
             networkLogs: this.networkLogs.length,
             consoleLogs: this.consoleLogs.length,
             requests: this.requestCount,
             uptime: Math.round((Date.now() - this.startedAt) / 1000),
-            version: 3
+            version: 3,
+            serverVersion: require('./package.json').version,
+            // 插件侧版本: 与 manifest.json 对比即可判断"浏览器是否加载了最新代码"
+            plugin: this.lastRegistration || null,
+            security: {
+              host: this.host,
+              loopbackOnly: true,
+              tokenAuth: this.authToken ? true : false,
+              tokenSource: this.authSource,
+              tokenFile: this.authTokenFile,
+              wsTokenRequired: this.wsTokenRequired
+            }
           };
           break;
 
@@ -863,21 +1051,18 @@ class ArkWebServer {
           result = await this.cmd('evaluate', await this.readBody(req));
           break;
 
+        // 等待类端点: 服务端 cmd 超时必须跟随 body.timeout, 否则用户请求 40s 等待会被默认 20s 掐断
+        // (实测: wait-for-load {timeout:40000} 在挂起资源页面上 20s 被 server 超时, 插件侧仍在等)
         case '/wait-for':
-          result = await this.cmd('wait-for-selector', await this.readBody(req));
-          break;
-
         case '/wait-for-text':
-          result = await this.cmd('wait-for-text', await this.readBody(req));
-          break;
-
         case '/wait-for-url':
-          result = await this.cmd('wait-for-url', await this.readBody(req));
+        case '/wait-for-load': {
+          const body = await this.readBody(req).catch(() => ({}));
+          const waitMs = Math.min(Math.max((+body.timeout || 15000) + 5000, 20000), 300000);
+          const typeMap = { '/wait-for': 'wait-for-selector', '/wait-for-text': 'wait-for-text', '/wait-for-url': 'wait-for-url', '/wait-for-load': 'wait-for-load' };
+          result = await this.cmd(typeMap[pathname], body, waitMs);
           break;
-
-        case '/wait-for-load':
-          result = await this.cmd('wait-for-load', await this.readBody(req).catch(() => ({})));
-          break;
+        }
 
         // ============ 截图 / PDF ============
         case '/screenshot':
@@ -924,7 +1109,8 @@ class ArkWebServer {
             try {
               const b64 = result.dataUrl.split(',')[1] || result.dataUrl;
               const buf = Buffer.from(b64, 'base64');
-              const ct = (snapParams.format === 'jpeg' || snapParams.format === 'jpg') ? 'image/jpeg' : 'image/png';
+              const f = String(snapParams.format || '').toLowerCase();
+              const ct = (f === 'jpeg' || f === 'jpg') ? 'image/jpeg' : f === 'webp' ? 'image/webp' : 'image/png';
               // 元信息走 Header(截断防超限)，主图走 body，AI 仍可解析图 + 锚点
               const elsHeader = JSON.stringify(result.elements || []).slice(0, 8000);
               res.writeHead(200, {
@@ -944,6 +1130,43 @@ class ArkWebServer {
               result._binaryError = e.message;
             }
           }
+          break;
+        }
+
+        case '/snapshot/zoom': {
+          // 裁剪放大截图: 小字/细节读不清时用。ref 指 SoM 编号(需先拍一次 annotate snapshot)
+          const body = req.method === 'POST' ? await this.readBody(req).catch(() => ({})) : {};
+          if (url.searchParams.get('ref')) body.ref = +url.searchParams.get('ref');
+          if (url.searchParams.get('selector')) body.selector = url.searchParams.get('selector');
+          if (url.searchParams.get('scale')) body.scale = +url.searchParams.get('scale');
+          if (url.searchParams.get('format')) body.format = url.searchParams.get('format');
+          if (url.searchParams.get('quality')) body.quality = +url.searchParams.get('quality');
+          body.tabId = tabId ?? undefined;
+          result = await this.cmd('zoom-shot', body, 25000);
+          break;
+        }
+
+        case '/snapshot/text': {
+          // 可见文本块 + 紧致坐标(不用截图就能"读"页面): 读小字/取文案/交叉校验用
+          const body = req.method === 'POST' ? await this.readBody(req).catch(() => ({})) : {};
+          if (url.searchParams.get('max')) body.max = +url.searchParams.get('max');
+          if (url.searchParams.get('minLen')) body.minLen = +url.searchParams.get('minLen');
+          result = await this.cmd('text-map', body, 15000);
+          break;
+        }
+
+        case '/wait-for-stable': {
+          // 等待页面稳定(DOM 连续静默): 替代固定 sleep, 避免拍到渲染过渡态
+          const body = req.method === 'POST' ? await this.readBody(req).catch(() => ({})) : {};
+          if (url.searchParams.get('timeout')) body.timeout = +url.searchParams.get('timeout');
+          if (url.searchParams.get('quiet')) body.quiet = +url.searchParams.get('quiet');
+          result = await this.cmd('wait-for-stable', body, Math.max(5000, (body.timeout || 15000) + 3000));
+          break;
+        }
+
+        case '/reload-extension': {
+          // 让浏览器重载插件代码(改完插件后用来自我更新; 重载后 CDP 授权失效需重新「启用调试」)
+          result = await this.cmd('reload-extension', {}, 8000);
           break;
         }
 
@@ -968,10 +1191,36 @@ class ArkWebServer {
         case '/act': {
           const body = await this.readBody(req);
           const { action, ...data } = body || {};
-          if (!action) { result = { error: 'action is required (snapshot|click|clickText|fill|type|extract|navigate|evaluate)' }; break; }
+          if (!action) { result = { error: 'action is required (snapshot|click|clickRef|hoverRef|fillRef|readText|zoom|clickText|fill|type|extract|navigate|evaluate)' }; break; }
           switch (action) {
             case 'snapshot': result = await this.cmd('vision-snapshot', { fast: true, ...data }, 15000); break;
             case 'click': result = await this.cmd('click-element', { fast: true, ...data }); break;
+            // ---- 视觉优先: 直接按 SoM 编号(ref)操作, 无需坐标换算, 滚动后仍安全 ----
+            // 支持 waitFor: 'load'|'url'|'text'|'selector' —— 点击后立即等条件成立, 省一次往返
+            case 'clickRef': result = await this.maybeWaitAfter(data, await this.cmd('click-ref', { fast: true, ...data })); break;
+            case 'hoverRef': result = await this.cmd('hover-ref', { ...data }); break;
+            case 'fillRef': result = await this.maybeWaitAfter(data, await this.cmd('fill-ref', { ...data })); break;
+            case 'readText': result = await this.cmd('read-text', { ...data }); break;
+            case 'zoom': result = await this.cmd('zoom-shot', { ...data }, 25000); break;
+            // 按可见文本查找元素(不点击), 返回 ref/坐标/上下文 —— 快照里没看清时的定点工具
+            case 'find': result = await this.cmd('find-text', { ...data }); break;
+            // 批量 ref 动作: 一次 HTTP 完成多步 [{op:'click',ref:3},{op:'fill',ref:2,value:'x'}]
+            case 'refs': {
+              const steps = Array.isArray(data.steps) ? data.steps : [];
+              if (!steps.length) { result = { error: 'steps is required: [{op:"click"|"hover"|"fill"|"read", ref, value?}]' }; break; }
+              const opMap = { click: 'click-ref', hover: 'hover-ref', fill: 'fill-ref', read: 'read-text', readText: 'read-text' };
+              const out = [];
+              for (const s of steps) {
+                const cmd = opMap[s.op];
+                if (!cmd) { out.push({ op: s.op, error: `unknown op: ${s.op}` }); continue; }
+                try {
+                  const r = await this.cmd(cmd, { ...s, ...(s.tabId != null ? {} : {}) });
+                  out.push({ op: s.op, ref: s.ref, result: r });
+                } catch (e) { out.push({ op: s.op, ref: s.ref, error: e.message }); }
+              }
+              result = { success: out.every(o => !o.error), steps: out };
+              break;
+            }
             case 'clickText': {
               // 视觉文本点击：snapshot 坐标优先，evaluate 兜底
               try {
@@ -1519,7 +1768,139 @@ class ArkWebServer {
     };
   }
 
+  // ============ 安全 ============
+
+  /** 令牌来源优先级: ARK_TOKEN 环境变量 > 共享令牌文件(~/.ark-web/token) > 旧位置 server/.ark-token > 自动生成 */
+  resolveAuth(explicitToken) {
+    if (process.env.ARK_NO_AUTH === '1' || process.env.ARK_NO_AUTH === 'true') {
+      return { token: null, source: 'disabled' };
+    }
+    if (explicitToken) return { token: String(explicitToken), source: 'options' };
+    if (process.env.ARK_TOKEN) return { token: String(process.env.ARK_TOKEN), source: 'env' };
+    const candidates = [
+      { file: SHARED_TOKEN_FILE, label: '共享文件(~/.ark-web/token)' },
+      { file: LEGACY_TOKEN_FILE, label: '文件(server/.ark-token)' }
+    ];
+    for (const c of candidates) {
+      try {
+        const t = fs.readFileSync(c.file, 'utf8').trim();
+        if (t) {
+          // 若命中的是旧位置, 顺便补齐共享文件, 让其他副本的 CLI 也能读到同一令牌
+          if (c.file !== SHARED_TOKEN_FILE) {
+            try {
+              fs.mkdirSync(SHARED_TOKEN_DIR, { recursive: true });
+              fs.writeFileSync(SHARED_TOKEN_FILE, t + '\n', { mode: 0o600 });
+            } catch { /* 无法写入共享位置时忽略, 继续用旧位置 */ }
+          }
+          return { token: t, source: c.label, tokenFile: c.file };
+        }
+      } catch { /* 不存在则继续 */ }
+    }
+    const generated = crypto.randomBytes(24).toString('hex');
+    let written = null;
+    try {
+      fs.mkdirSync(SHARED_TOKEN_DIR, { recursive: true });
+      fs.writeFileSync(SHARED_TOKEN_FILE, generated + '\n', { mode: 0o600 });
+      written = SHARED_TOKEN_FILE;
+    } catch {
+      try { fs.writeFileSync(LEGACY_TOKEN_FILE, generated + '\n', { mode: 0o600 }); written = LEGACY_TOKEN_FILE; } catch { /* 只读目录: 仅日志提示 */ }
+    }
+    return { token: generated, source: '自动生成', tokenFile: written };
+  }
+
+  /** 常量时间比较(先哈希对齐长度, 避免长度差异泄露) */
+  tokenEquals(a, b) {
+    if (!a || !b) return false;
+    const ha = crypto.createHash('sha256').update(String(a)).digest();
+    const hb = crypto.createHash('sha256').update(String(b)).digest();
+    return crypto.timingSafeEqual(ha, hb);
+  }
+
+  /** 从 X-Ark-Token 头 / Authorization: Bearer / ?token= 提取令牌 */
+  requestToken(req, url) {
+    const header = req.headers['x-ark-token'];
+    if (header) return String(header);
+    const auth = req.headers.authorization;
+    if (auth && /^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, '').trim();
+    return url?.searchParams?.get('token') || null;
+  }
+
+  /** Host 头解析: 支持 [::1]:9333 这种 IPv6 带端口形式 */
+  hostnameOf(hostHeader) {
+    const h = String(hostHeader || '').trim().toLowerCase();
+    if (!h) return '';
+    if (h.startsWith('[')) {
+      const end = h.indexOf(']');
+      return end > 0 ? h.slice(1, end) : h;
+    }
+    return h.split(':')[0];
+  }
+
+  /** 仅接受回环 Host —— 挡 DNS rebinding 与外部网卡直连 */
+  isLoopbackHost(hostHeader) {
+    return LOOPBACK_HOSTS.has(this.hostnameOf(hostHeader));
+  }
+
+  /** 允许的来源: 无 Origin(curl/CLI) / 浏览器扩展页面 / 本机页面 */
+  isAllowedOrigin(origin) {
+    if (!origin) return true;
+    try {
+      const u = new URL(origin);
+      if (EXTENSION_PROTOCOLS.has(u.protocol)) return true;
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        const hn = u.hostname.toLowerCase();
+        return hn === '127.0.0.1' || hn === 'localhost' || hn === '::1' || hn === '[::1]';
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  printSecurityBanner() {
+    console.log('[ArkWeb] 安全状态:');
+    console.log(`  · 监听地址: ${this.host}:${this.port} / ws ${this.host}:${this.wsPort} (仅回环, 局域网不可达)`);
+    console.log('  · Host/Origin 校验: 已启用(仅回环 Host + 本机/扩展来源)');
+    if (this.authSource === 'disabled') {
+      console.warn('  · 令牌鉴权: 已禁用(ARK_NO_AUTH=1) —— 本机任意进程与任意网页均可操控浏览器, 请勿在不可信环境使用!');
+    } else {
+      const src = { env: 'ARK_TOKEN 环境变量', file: 'server/.ark-token', generated: '本次自动生成并写入 server/.ark-token', options: '构造参数' }[this.authSource] || this.authSource;
+      console.log(`  · 令牌鉴权: 已启用(来源: ${src})`);
+      console.log(`  · 访问令牌: ${this.authToken}`);
+      console.log('    (请求需带 X-Ark-Token 头或 ?token=; client/browser-client.js 会自动读取并携带)');
+    }
+    if (this.wsTokenRequired) {
+      console.log('  · WS 令牌: 已启用(插件 popup 需填入相同令牌)');
+    } else {
+      console.warn('  · WS 令牌: 未启用 —— 本机任意进程可直连 9334 控制浏览器。需要防护请设置 ARK_TOKEN 并在插件 popup 填入相同值。');
+    }
+    console.log('');
+  }
+
   // ============ 工具 ============
+
+  /** 动作后置等待(省往返): data.waitFor = 'load'|'url'|'text'|'selector' */
+  async maybeWaitAfter(data = {}, r) {
+    const w = data.waitFor;
+    if (!w || !r || r.error) return r;
+    const cmd = { load: 'wait-for-load', url: 'wait-for-url', text: 'wait-for-text', selector: 'wait-for-selector' }[w];
+    if (!cmd) return { ...r, waitError: `unknown waitFor: ${w}(可用 load|url|text|selector)` };
+    try {
+      const wd = {
+        timeout: data.waitTimeout || 8000,
+        // 点击后等待: 必须观察到导航发生(loading/URL 变化), 否则会误判"旧文档已 complete"
+        ...(w === 'load' ? { afterAction: true } : {}),
+        ...(data.pattern ? { pattern: data.pattern } : {}),
+        ...(data.text ? { text: data.text } : {}),
+        ...(data.selector ? { selector: data.selector } : {}),
+        ...(data.state ? { state: data.state } : {})
+      };
+      const waitMs = data.waitTimeout || 8000;
+      return { ...r, waited: await this.cmd(cmd, wd, Math.min(waitMs + 5000, 120000)) };
+    } catch (e) {
+      return { ...r, waitError: e.message };
+    }
+  }
 
   readBody(req) {
     return new Promise((resolve, reject) => {
@@ -1565,6 +1946,8 @@ if (require.main === module) {
   });
   new ArkWebServer({
     port: parseInt(process.env.BRIDGE_PORT || '9333'),
-    wsPort: parseInt(process.env.BRIDGE_WS_PORT || '9334')
+    wsPort: parseInt(process.env.BRIDGE_WS_PORT || '9334'),
+    // 默认 127.0.0.1(仅本机); 确需局域网访问才设 BRIDGE_HOST=0.0.0.0, 并务必同时设置 ARK_TOKEN
+    host: process.env.BRIDGE_HOST || '127.0.0.1'
   });
 }

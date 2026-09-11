@@ -11,17 +11,55 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 20, keepAliveMsecs: 8000, maxFreeSockets: 10, timeout: 45000 });
 keepAliveAgent.on('free', () => {}); // 占位，避免 freeSockets 泄漏告警
 
+/** 统一的连接参数解析: 显式参数 > 环境变量 > server/.ark-token 文件 > 默认值
+ *  server 默认绑定 127.0.0.1 并启用令牌鉴权, 因此客户端默认也要带上令牌。 */
+function resolveConnection(overrides = {}) {
+  const host = overrides.host || process.env.ARK_HOST || '127.0.0.1';
+  const port = parseInt(overrides.port || process.env.ARK_PORT || process.env.BRIDGE_PORT || '9333', 10) || 9333;
+  let token = overrides.token || process.env.ARK_TOKEN || null;
+  let tokenSource = token ? '参数/环境变量' : null;
+  if (!token) {
+    const candidates = [
+      // 用户级共享令牌(多份项目副本共用同一个, 避免"服务端/CLI 令牌不一致"的 401)
+      path.join(os.homedir(), '.ark-web', 'token'),
+      path.join(__dirname, '..', 'server', '.ark-token'),
+      path.join(process.cwd(), 'server', '.ark-token'),
+      path.join(process.cwd(), '.ark-token')
+    ];
+    for (const f of candidates) {
+      try {
+        const t = fs.readFileSync(f, 'utf8').trim();
+        if (t) { token = t; tokenSource = f; break; }
+      } catch { /* 文件不存在则继续尝试下一个 */ }
+    }
+  }
+  return { host, port, token, tokenSource };
+}
+
 class BrowserClient {
   constructor(options = {}) {
-    this.host = options.host || 'localhost';
-    this.port = options.port || 9333;
+    const conn = resolveConnection(options);
+    this.host = conn.host;
+    this.port = conn.port;
+    this.token = conn.token;
+    this.tokenSource = conn.tokenSource;
     this.baseUrl = `http://${this.host}:${this.port}`;
     this.session = options.session || null;
+    // 固定目标标签页(等价于每个请求都带 ?tabId=) —— 多标签页环境下确定性定位
+    this.tabId = options.tabId != null ? options.tabId : null;
+  }
+
+  /** 统一构造请求头(自动携带访问令牌) */
+  headers(extra = {}) {
+    const h = { ...extra };
+    if (this.token) h['X-Ark-Token'] = this.token;
+    return h;
   }
 
   // ============ HTTP (keep-alive) ============
@@ -31,6 +69,8 @@ class BrowserClient {
       const url = new URL(pathName, this.baseUrl);
       // 会话参数: 所有请求自动携带 ?session=<id>(多 agent 并行隔离)
       if (this.session) url.searchParams.set('session', this.session);
+      // 目标标签页: 多标签页环境下避免"打到活动标签页"的漂移
+      if (this.tabId != null && !url.searchParams.has('tabId')) url.searchParams.set('tabId', this.tabId);
       const method = options.method || 'GET';
       const body = options.body;
       const timeout = options.timeout || 60000;
@@ -41,14 +81,19 @@ class BrowserClient {
         path: url.pathname + url.search,
         method,
         agent: keepAliveAgent,
-        headers: body ? { 'Content-Type': 'application/json' } : {},
+        headers: body ? this.headers({ 'Content-Type': 'application/json' }) : this.headers(),
         timeout
       }, (res) => {
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
-          try { resolve(JSON.parse(data)); }
-          catch { resolve({ raw: data }); }
+          let parsed;
+          try { parsed = JSON.parse(data); }
+          catch { parsed = { raw: data }; }
+          if (res.statusCode === 401 && !parsed.hint) {
+            parsed.hint = '访问令牌缺失或不匹配。CLI 会自动读取 server/.ark-token; 若已改端口/令牌, 用 --port/--token 指定。';
+          }
+          resolve(parsed);
         });
       });
 
@@ -164,6 +209,10 @@ class BrowserClient {
   async waitForLoad(timeout = 15000) {
     return this.post('/wait-for-load', { timeout });
   }
+  /** 等页面稳定(DOM 连续 quiet 毫秒无变动) —— 比固定 sleep 可靠, 采集前调用可避免拍到过渡态 */
+  async waitForStable(opts = {}) {
+    return this.post('/wait-for-stable', { timeout: 15000, quiet: 400, ...opts });
+  }
 
   // ============ 截图 / PDF ============
 
@@ -189,7 +238,8 @@ class BrowserClient {
     return new Promise((resolve, reject) => {
       const url = new URL(`/snapshot/binary?${qs.toString()}`, this.baseUrl);
       if (this.session) url.searchParams.set('session', this.session);
-      const req = http.request({ hostname: url.hostname, port: url.port||this.port, path: url.pathname+url.search, method:'GET', agent: keepAliveAgent }, (res)=>{
+      if (this.tabId != null && !url.searchParams.has('tabId')) url.searchParams.set('tabId', this.tabId);
+      const req = http.request({ hostname: url.hostname, port: url.port||this.port, path: url.pathname+url.search, method:'GET', agent: keepAliveAgent, headers: this.headers() }, (res)=>{
         const chunks=[];
         res.on('data', c=>chunks.push(c));
         res.on('end', ()=>{
@@ -218,6 +268,32 @@ class BrowserClient {
     if (!r?.buffer) return { error: r?.error || 'Binary snapshot failed', raw: r };
     fs.writeFileSync(filePath, r.buffer);
     return { success: true, file: filePath, url: r.url, title: r.title, viewport: r.viewport, elements: r.elements, contentType: r.contentType };
+  }
+
+  // ============ 视觉 ref 操作(按 SoM 编号, 无需坐标换算) ============
+  // 用法: const snap = await c.snapshot({annotate:true}); await c.clickRef(snap.elements[3].ref);
+
+  async act(action, data = {}) { return this.post('/act', { action, ...data }); }
+  async clickRef(ref, opts = {}) { return this.post('/act', { action: 'clickRef', ref, ...opts }); }
+  async hoverRef(ref, opts = {}) { return this.post('/act', { action: 'hoverRef', ref, ...opts }); }
+  async fillRef(ref, value, opts = {}) { return this.post('/act', { action: 'fillRef', ref, value, ...opts }); }
+  /** 读取 ref 元素的完整文本/值/属性(小字读不清时比放大截图省 token) */
+  async readText(ref) { return this.post('/act', { action: 'readText', ref }); }
+  /** 按可见文本查找元素(不点击), 返回 ref/坐标/是否可点 */
+  async find(text, opts = {}) { return this.post('/act', { action: 'find', text, ...opts }); }
+  /** 批量 ref 动作: steps = [{op:'click'|'hover'|'fill'|'read', ref, value?}] —— 一次 HTTP 完成多步 */
+  async refs(steps) { return this.post('/act', { action: 'refs', steps }); }
+  /** 可见文本块 + 紧致坐标(免截图读页面) */
+  async textMap(opts = {}) { return this.post('/snapshot/text', opts); }
+  /** 重载插件代码(改完 extension/ 后自我更新); 重载后 CDP 授权失效需重新「启用调试」 */
+  async reloadExtension() { return this.post('/reload-extension', {}); }
+  /** 裁剪放大截图(CDP): ref / selector / x,y,width,height + scale(默认2, 最大5) */
+  async zoom(opts = {}) { return this.post('/snapshot/zoom', opts); }
+  async zoomToFile(filePath = 'zoom.png', opts = {}) {
+    const r = await this.zoom(opts);
+    if (!r?.dataUrl) return { error: r?.error || 'Zoom failed', raw: r };
+    fs.writeFileSync(filePath, Buffer.from(r.dataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64'));
+    return { success: true, file: filePath, scale: r.scale, clip: r.clip, text: r.text };
   }
 
   /** 截图并保存到本地文件, 返回文件路径 */
@@ -430,6 +506,10 @@ if (require.main === module) {
   // 解决 PowerShell 5.1 命令行内嵌中文被 GBK 控制台损坏的问题)
   let sessionOpt = null;
   let bodyFile = null;
+  let portOpt = null;
+  let hostOpt = null;
+  let tokenOpt = null;
+  let tabIdOpt = null;
   const args = [];
   for (let i = 0; i < process.argv.slice(2).length; i++) {
     const a = process.argv.slice(2)[i];
@@ -437,9 +517,19 @@ if (require.main === module) {
     if (a.startsWith('--session=')) { sessionOpt = a.slice('--session='.length); continue; }
     if (a === '--body-file' || a === '--body-file=') { bodyFile = process.argv.slice(2)[++i]; continue; }
     if (a.startsWith('--body-file=')) { bodyFile = a.slice('--body-file='.length); continue; }
+    // 连接参数: 端口/主机/令牌(也可用 ARK_PORT / ARK_HOST / ARK_TOKEN 环境变量)
+    if (a === '--port') { portOpt = process.argv.slice(2)[++i]; continue; }
+    if (a.startsWith('--port=')) { portOpt = a.slice('--port='.length); continue; }
+    if (a === '--host') { hostOpt = process.argv.slice(2)[++i]; continue; }
+    if (a.startsWith('--host=')) { hostOpt = a.slice('--host='.length); continue; }
+    if (a === '--token') { tokenOpt = process.argv.slice(2)[++i]; continue; }
+    if (a.startsWith('--token=')) { tokenOpt = a.slice('--token='.length); continue; }
+    // 目标标签页: 所有请求自动带 ?tabId=(多标签页/多窗口下确定性定位)
+    if (a === '--tabId') { tabIdOpt = process.argv.slice(2)[++i]; continue; }
+    if (a.startsWith('--tabId=')) { tabIdOpt = a.slice('--tabId='.length); continue; }
     args.push(a);
   }
-  const client = new BrowserClient({ session: sessionOpt || undefined });
+  const client = new BrowserClient({ session: sessionOpt || undefined, host: hostOpt || undefined, port: portOpt || undefined, token: tokenOpt || undefined, tabId: tabIdOpt || undefined });
     // body-file 覆盖: 除 /batch(chain) 外的所有 POST 请求 body 使用文件内容(UTF-8)
     // chain 场景: 文件内容含 steps 数组时直接用文件步骤(JSON 可完整表达嵌套, 绕开命令行转义)
     let bodyOverride = null;
@@ -580,6 +670,7 @@ if (require.main === module) {
         case 'wait-for-text': result = await client.waitForText(args[1], parseInt(args[2]) || 10000, args[3]); break;
         case 'wait-for-url': result = await client.waitForUrl(args[1], parseInt(args[2]) || 10000); break;
         case 'wait-load': result = await client.waitForLoad(); break;
+        case 'wait-stable': result = await client.waitForStable({ timeout: +(args[1] || 15000) }); break;
 
         // 截图 / PDF / 视觉快照(v7-vision)
         case 'screenshot': result = await client.screenshotToFile(args[1] || 'screenshot.png'); break;
@@ -592,7 +683,7 @@ if (require.main === module) {
           const opts = {};
           for (let i = 1; i < args.length; i++) {
             const a = args[i];
-            if (!file && /\.(png|jpe?g)$/i.test(a)) { file = a; continue; }
+            if (!file && /\.(png|webp|jpe?g)$/i.test(a)) { file = a; continue; }
             if (a === '--annotate' || a === '--annotate=true' || a === '-a') opts.annotate = true;
             else if (a === '--full' || a === '--full=true') opts.full = true;
             else if (a.startsWith('--format=')) opts.format = a.split('=')[1];
@@ -603,6 +694,8 @@ if (require.main === module) {
             else if (a === '--selector' && args[i+1]) opts.selector = args[++i];
             else if (a.startsWith('--max=')) opts.maxElements = +a.split('=')[1];
             else if (a === '--max' && args[i+1]) opts.maxElements = +args[++i];
+            else if (a === '--compact' || a.startsWith('--compact=')) opts.compact = true;
+            else if (a === '--webp') opts.format = 'webp';
           }
           // body-file 覆盖已在入口处理(POST /snapshot 的 body 来自文件)
           if (file) result = await client.snapshotToFile(file, opts);
@@ -611,6 +704,43 @@ if (require.main === module) {
             if (Object.keys(opts).length) result = await client.snapshot(opts);
             else result = await client.snapshot({});
           }
+          break;
+        }
+        // 视觉 ref 操作: 直接按 SoM 编号操作, 无需坐标
+        case 'click-ref': result = await client.clickRef(+args[1], { fast: true }); break;
+        case 'hover-ref': result = await client.hoverRef(+args[1]); break;
+        case 'fill-ref': result = await client.fillRef(+args[1], args.slice(2).join(' ')); break;
+        case 'read-text': result = await client.readText(+args[1]); break;
+        case 'act': {
+          // 通用高层动作: act '{"action":"clickRef","ref":3,"waitFor":"load"}'
+          const body = parseJsonOrRaw(args.slice(1).join(' '), null);
+          if (!body || typeof body !== 'object' || !body.action) {
+            result = { error: '用法: act \'{"action":"clickRef","ref":3}\'', actions: ['snapshot', 'clickRef', 'hoverRef', 'fillRef', 'readText', 'zoom', 'find', 'refs', 'click', 'clickText', 'fill', 'type', 'extract', 'navigate', 'evaluate'] };
+            break;
+          }
+          const { action, ...rest } = body;
+          result = await client.act(action, rest);
+          break;
+        }
+        case 'find': result = await client.find(args.slice(1).join(' ')); break;
+        case 'text-map': result = await client.textMap(parseJsonOrRaw(args[1], {})); break;
+        case 'refs': result = await client.refs(parseJsonOrRaw(args.slice(1).join(' '), [])); break;
+        case 'reload-extension': result = await client.reloadExtension(); break;
+        case 'zoom': {
+          // 用法: zoom [ref|selector] [out.png|out.webp] [--scale=3] [--format=webp]
+          const opts = {};
+          const file = args.find(a => /\.(png|webp|jpe?g)$/i.test(a)) || null;
+          for (let i = 1; i < args.length; i++) {
+            const a = args[i];
+            if (/\.(png|webp|jpe?g)$/i.test(a)) continue;
+            if (a.startsWith('--scale=')) opts.scale = +a.split('=')[1];
+            else if (a === '--scale' && args[i + 1]) opts.scale = +args[++i];
+            else if (a.startsWith('--format=')) opts.format = a.split('=')[1];
+            else if (a === '--format' && args[i + 1]) opts.format = args[++i];
+            else if (/^\d+$/.test(a)) opts.ref = +a;
+            else if (!opts.selector) opts.selector = a;
+          }
+          result = file ? await client.zoomToFile(file, opts) : await client.zoom(opts);
           break;
         }
         case 'pdf': result = await client.pdfToFile(args[1] || 'page.pdf', args[2] || 'A4'); break;
@@ -758,7 +888,11 @@ if (require.main === module) {
       'f12': 'simulate-key', 'f5': 'simulate-key', 'enter': 'simulate-key', 'escape': 'simulate-key',
       'evaluate': 'evaluate', 'wait-for': 'wait-for-selector',
       'wait-for-text': 'wait-for-text', 'wait-for-url': 'wait-for-url', 'wait-load': 'wait-for-load',
+      'wait-stable': 'wait-for-stable',
       'snapshot': 'vision-snapshot', 'snapshot-annotate': 'vision-snapshot',
+      'click-ref': 'click-ref', 'hover-ref': 'hover-ref', 'fill-ref': 'fill-ref',
+      'read-text': 'read-text', 'zoom': 'zoom-shot',
+      'text-map': 'text-map', 'find': 'find-text', 'reload-extension': 'reload-extension',
       'screenshot': 'screenshot', 'screenshot-full': 'screenshot-full',
       'screenshot-element': 'screenshot-element', 'pdf': 'print-to-pdf',
       'highlight': 'highlight-elements', 'highlight-clear': 'clear-highlights',
@@ -785,7 +919,7 @@ if (require.main === module) {
       'clear-cache': 'clear-cache'
     };
     // 客户端本地执行的步骤类型(不经 /batch, 直接调 HTTP 聚合端点)
-    const CLIENT_STEPS = new Set(['full', 'analyze-all', 'monitor', 'monitor-stop', 'monitor-status', 'report', 'act', 'fast']);
+    const CLIENT_STEPS = new Set(['full', 'analyze-all', 'monitor', 'monitor-stop', 'monitor-status', 'report', 'act', 'fast', 'refs']);
 
     const norm = steps.map(({ type, data }) => {
       const raw = data?._raw || [];
@@ -829,6 +963,22 @@ if (require.main === module) {
           break;
         }
         case 'check': d.selector = raw[0]; d.checked = raw[1] !== 'off' && raw[1] !== 'false' && raw[1] !== '0'; break;
+        case 'click-ref': case 'hover-ref': d.ref = parseInt(raw[0], 10); d.fast = true; break;
+        case 'fill-ref': d.ref = parseInt(raw[0], 10); d.value = raw.slice(1).join(' '); break;
+        case 'read-text': d.ref = parseInt(raw[0], 10); break;
+        case 'find': d.text = raw.join(' '); break;
+        case 'refs': d.steps = parseJsonOrRaw(raw.join(' '), []); if (!Array.isArray(d.steps)) d.steps = []; break;
+        case 'zoom': {
+          d.scale = 3;
+          for (let i = 0; i < raw.length; i++) {
+            const a = raw[i];
+            if (/^\d+$/.test(a)) d.ref = parseInt(a, 10);
+            else if (a.startsWith('--scale=')) d.scale = +a.slice(8);
+            else if (a.startsWith('--format=')) d.format = a.slice(9);
+            else if (!a.startsWith('--') && !/\.(png|webp|jpe?g)$/i.test(a)) d.selector = a;
+          }
+          break;
+        }
         case 'scroll': d.x = +(raw[0] || 0); d.y = +(raw[1] || 0); break;
         case 'scroll-top': d.x = 0; d.y = 0; break;
         case 'scroll-bottom': d.x = 0; d.y = 999999; break;
@@ -837,6 +987,7 @@ if (require.main === module) {
         case 'wait-for': d.selector = raw[0]; d.timeout = +(raw[1] || 10000); break;
         case 'wait-for-text': d.text = raw[0]; d.timeout = +(raw[1] || 10000); if (raw[2]) d.selector = raw[2]; break;
         case 'wait-for-url': d.pattern = raw[0]; d.timeout = +(raw[1] || 10000); break;
+        case 'wait-stable': d.timeout = +(raw[0] || 15000); if (raw[1]) d.quiet = +raw[1]; break;
         case 'text': d.selector = raw[0] || 'body'; break;
         case 'html': if (raw[0]) d.selector = raw[0]; break;
         case 'highlight': d.color = raw[1] || '#ff0000'; if (raw[2]) d.label = raw[2]; break;
@@ -948,6 +1099,7 @@ if (require.main === module) {
           case 'monitor-stop': r = await client.stopMonitor(); break;
           case 'monitor-status': r = await client.getMonitorStatus(); break;
           case 'report': r = await client.generateReport(s._raw?.[0] || 'browser-report.json'); break;
+          case 'refs': r = await client.refs(s.data.steps || []); break;
           case 'act':
           case 'fast': {
             // 统一走 /act 一次 HTTP 完成高层意图
@@ -1028,5 +1180,8 @@ Cookie:      cookies | cookie-set <name> <value> | cookie-remove <name> [url]
 
   run();
 }
+
+// 暴露连接参数解析(脚本/测试可直接复用: 自动从 server/.ark-token 读令牌、从环境变量读端口)
+BrowserClient.resolveConnection = resolveConnection;
 
 module.exports = BrowserClient;

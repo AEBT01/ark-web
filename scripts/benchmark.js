@@ -8,8 +8,9 @@
  * 用法: node scripts/benchmark.js [--rounds 15]
  */
 const http = require('http');
-
-const HOST = 'localhost', PORT = 9333;
+const { resolveConnection } = require('../client/browser-client');
+const CONN = resolveConnection();
+const HOST = CONN.host, PORT = CONN.port, TOKEN = CONN.token;
 const ROUNDS = parseInt(process.argv[process.argv.indexOf('--rounds') + 1] || 15, 10);
 const agent = new http.Agent({ keepAlive: true, maxSockets: 10 });
 
@@ -33,7 +34,7 @@ function req(method, path, body, timeout = 30000) {
   return new Promise((resolve, reject) => {
     const t0 = process.hrtime.bigint();
     const r = http.request({ hostname: HOST, port: PORT, path, method, agent,
-      headers: body ? { 'Content-Type': 'application/json' } : {}, timeout }, res => {
+      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(TOKEN ? { 'X-Ark-Token': TOKEN } : {}) }, timeout }, res => {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {

@@ -38,6 +38,8 @@ const INCLUDES = [
   'client/browser-client.js',
   'client/ark-fast.js',
   'scripts/check-endpoints.js',
+  'scripts/doctor.js',
+  'scripts/sync.js',
   'scripts/smoke-test.js',
   'scripts/real-scenario-v3.js',
   'scripts/real-scenario-v4.js',
@@ -52,6 +54,13 @@ const INCLUDES = [
 ];
 
 function main() {
+  // references/ 为渐进式披露的详查资料, 自动纳入打包
+  const refDir = path.join(ROOT, 'references');
+  if (fs.existsSync(refDir)) {
+    for (const f of fs.readdirSync(refDir).sort()) {
+      if (f.endsWith('.md')) INCLUDES.push(`references/${f}`);
+    }
+  }
   // 1. 清理旧的打包目录
   fs.rmSync(DIST, { recursive: true, force: true });
   fs.mkdirSync(stageDir, { recursive: true });

@@ -5,12 +5,15 @@
  *   echo "[...]" | node exec-actions.js -                 # stdin
  * 兼容: type 的 text/value 双 key(归一化 text 优先); 逐步输出结果, 失败不中断
  */
-const BASE = 'http://localhost:9333';
+const { resolveConnection } = require('../client/browser-client');
+const CONN = resolveConnection();
+const BASE = `http://${CONN.host}:${CONN.port}`;
+const AUTH = CONN.token ? { 'X-Ark-Token': CONN.token } : {};
 
 async function api(path, body) {
   const r = await fetch(BASE + path, body ? {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-  } : undefined);
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH }, body: JSON.stringify(body)
+  } : { headers: { ...AUTH } });
   const j = await r.json().catch(() => ({}));
   return j;
 }

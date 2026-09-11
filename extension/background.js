@@ -474,7 +474,11 @@ class CdpManager {
 class ArkWeb {
   constructor() {
     this.ws = null;
+    // 连接配置: 默认与本机 server 对齐(127.0.0.1:9334, 无令牌);
+    // 可在 popup 修改并持久化到 chrome.storage.local(键: arkWsHost / arkWsPort / arkWsToken)
+    this.wsHost = '127.0.0.1';
     this.serverPort = 9334;
+    this.wsToken = '';
     this.connected = false;
     this.requestId = 0;
     this._swStartedAt = Date.now();
@@ -484,6 +488,8 @@ class ArkWeb {
     this.domChanges = new Map();
     this.cdp = new CdpManager();
     this.deviceOverrides = new Map();   // tabId -> {config, origUA}
+    this._viewportProbe = new Map();    // tabId -> {ts, result}: 视口探测缓存(避免每条命令多一次 evaluate)
+    this._pendingNav = new Map();       // tabId -> {url, ts}: 刚触发的导航, 供 wait-for-load 判定"新文档"而非旧文档
     this._activeTabId = null;
     this.consoleFlushTimers = new Map(); // tabId -> timer(节流转发)
     this.dialogLogs = new Map();        // tabId -> [{message, type, url, timestamp}]
@@ -572,11 +578,55 @@ class ArkWeb {
       .catch(() => {});
     chrome.runtime.onStartup.addListener(() => this.connectToServer());
 
-    this.connectToServer();
+    // 连接配置变更(用户在 popup 改了端口/令牌) → 断开重连
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      if (!['arkWsHost', 'arkWsPort', 'arkWsToken'].some(k => k in changes)) return;
+      try { if (this.ws) this.ws.close(); } catch { /* ignore */ }
+      this.loadWsConfig().then(() => this.connectToServer());
+    });
+
+    this.loadWsConfig().then(() => this.connectToServer());
     setInterval(() => {
       if (!this.connected) this.connectToServer();
       else this.send({ type: 'ping' });
     }, 15000);
+  }
+
+  /** 识别真实浏览器内核: chrome / quark(夸克) / edge / brave / chromium
+   *  (用于 /status 上报, 便于区分"插件没连上"与"夸克内核行为差异") */
+  detectKernel() {
+    try {
+      const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+      if (/Quark/i.test(ua)) return 'quark';
+      if (/Edg\//i.test(ua)) return 'edge';
+      if (/Brave/i.test(ua)) return 'brave';
+      if (/Chrome\//i.test(ua)) return 'chrome';
+      return 'chromium';
+    } catch { return 'unknown'; }
+  }
+
+  // ============ 连接配置(popup 可改, 持久化) ============
+
+  async loadWsConfig() {
+    try {
+      const cfg = await chrome.storage.local.get(['arkWsHost', 'arkWsPort', 'arkWsToken']);
+      if (cfg.arkWsHost) this.wsHost = String(cfg.arkWsHost).trim();
+      if (cfg.arkWsPort) this.serverPort = parseInt(cfg.arkWsPort, 10) || 9334;
+      this.wsToken = cfg.arkWsToken ? String(cfg.arkWsToken).trim() : '';
+    } catch { /* storage 不可用时用默认值 */ }
+    return { host: this.wsHost, port: this.serverPort, token: this.wsToken };
+  }
+
+  async saveWsConfig(partial = {}) {
+    const next = {
+      ...(partial.host != null ? { arkWsHost: String(partial.host).trim() } : {}),
+      ...(partial.port != null ? { arkWsPort: String(parseInt(partial.port, 10) || 9334) } : {}),
+      ...(partial.token != null ? { arkWsToken: String(partial.token).trim() } : {})
+    };
+    await chrome.storage.local.set(next);
+    await this.loadWsConfig();
+    return { host: this.wsHost, port: this.serverPort, token: this.wsToken };
   }
 
   // ============ WebSocket 管理 ============
@@ -589,13 +639,17 @@ class ArkWeb {
 
   connectToServer() {
     try {
-      this.ws = new WebSocket(`ws://localhost:${this.serverPort}`);
+      const host = this.wsHost || '127.0.0.1';
+      // 令牌经查询串传递(仅本机回环链路; server 配置了 ARK_TOKEN 时必须一致)
+      const qs = this.wsToken ? `?token=${encodeURIComponent(this.wsToken)}` : '';
+      this.ws = new WebSocket(`ws://${host}:${this.serverPort}${qs}`);
       this.ws.onopen = () => {
         this.connected = true;
         this.send({
           type: 'register',
           data: {
-            browser: 'chrome',
+            // 真实内核标识: 扩展本身跑在 chromium 内核上, 但用户实际可能用夸克/Edge 等套壳浏览器
+            browser: this.detectKernel(),
             version: chrome.runtime.getManifest().version,
             cdp: true,
             timestamp: Date.now()
@@ -793,6 +847,18 @@ class ArkWeb {
       case 'hover-element': return this.hoverElement(tabId, data);
       case 'double-click': return this.doubleClick(tabId, data);
       case 'right-click': return this.rightClick(tabId, data);
+
+      // ---------- 视觉 ref 操作(按 SoM 编号, 无需坐标) ----------
+      case 'click-ref': return this.clickRef(tabId, data);
+      case 'hover-ref': return this.hoverRef(tabId, data);
+      case 'fill-ref': return this.fillRef(tabId, data);
+      case 'read-text': return this.readTextRef(tabId, data);
+      case 'zoom-shot': return this.zoomShot(tabId, data);
+      case 'text-map': return this.textMap(tabId, data);
+      case 'find-text': return this.findText(tabId, data);
+
+      // ---------- 自更新 ----------
+      case 'reload-extension': return this.reloadExtension();
       case 'drag-element': return this.dragElement(tabId, data);
       case 'mouse': return this.mouseEvent(tabId, data);
       case 'scroll-page': return this.scrollPage(tabId, data);
@@ -814,6 +880,7 @@ class ArkWeb {
       case 'wait-for-text': return this.waitForText(tabId, data);
       case 'wait-for-url': return this.waitForUrl(tabId, data);
       case 'wait-for-load': return this.waitForLoad(tabId, data);
+      case 'wait-for-stable': return this.waitForStable(tabId, data);
 
       // ---------- 截图 / PDF ----------
       case 'screenshot': return this.screenshot(tabId, data);
@@ -939,6 +1006,8 @@ class ArkWeb {
     // 仅在确实前台打开时更新 activeTabId 缓存。后台 tab(active:false)绝不能写缓存:
     // 否则污染活动标签页判定 → 截图兜底/默认路由全部指向错误 tab(实测会把用户当前页面截走)
     if (tab.active) this._activeTabId = tab.id;
+    // 登记导航: 紧随其后的 wait-for-load 需等待【新文档】, 不能因旧文档已 complete 就返回
+    this._pendingNav.set(tab.id, { url, ts: Date.now() });
     return { success: true, tab: { id: tab.id, url: tab.url, title: tab.title }, usedActive: data.active !== false };
   }
 
@@ -947,6 +1016,7 @@ class ArkWeb {
     const { url } = data;
     if (!url) return { error: 'URL is required' };
     if (tabId == null) return { error: 'No active tab' };
+    this._pendingNav.set(tabId, { url, ts: Date.now() });   // 同上: 供 wait-for-load 判定新文档
     if (await this.cdp.tryAttach(tabId)) {
       try {
         const r = await this.cdp.send(tabId, 'Page.navigate', { url });
@@ -1320,6 +1390,7 @@ class ArkWeb {
     const { selector, fast, speed, steps: sSteps } = data || {};
     const fastSteps = fast || speed === 'fast' ? 4 : (Number(sSteps) || 8);
     if (!selector) return { error: 'selector is required' };
+    await this.ensureViewport(tabId);
     // 手动模式弹窗挂起检查: 渲染线程被模态弹窗阻塞, evaluate/鼠标事件会超时; 直接返回可操作错误
     const pending = this.getPendingDialog(tabId);
     if (pending) {
@@ -2130,44 +2201,90 @@ class ArkWeb {
     return { success: false, error: `timeout waiting for URL ${pattern}`, waited: Date.now() - start };
   }
 
-  async waitForLoad(tabId, data) {
+  /** 等待页面加载完成。
+   *  关键点(实测竞态修复): 若刚发生过导航动作(open/navigate, 或调用方显式 afterAction),
+   *  则"当前文档已 complete"不能作为完成依据 —— 那往往是【上一个文档】。
+   *  此时必须观察到 新文档进入 loading 或 URL 命中目标, 才判定完成。
+   *  v2.9.3 新增停滞宽限: 真实站点常引入永久挂起的第三方资源(如国内网络下的 cse.google.com),
+   *  导致 load 事件永不触发(readyState 卡在 interactive)。DOM 就绪超时后按部分完成返回。 */
+  async waitForLoad(tabId, data = {}) {
     const timeout = data?.timeout || 15000;
     const start = Date.now();
     if (tabId == null) return { error: 'No active tab' };
-    // v8: 40ms 轮询，首检快路径已 complete 立即返回；事件驱动由 onCdpEvent: Page.loadEventFired 辅助(后台已监听)
-    if (tabId != null && await this.cdp.tryAttach(tabId)) {
-      // 快速路径: 若已 complete 立即返回
-      try {
-        const quick = await this.cdp.evaluate(tabId, 'document.readyState').then(r=>r.result).catch(()=>null);
-        if (quick === 'complete') {
-          const info = await this.getPageInfo(tabId).catch(()=>null);
-          if (info && info.url && !info.url.startsWith('chrome://')) return { success: true, url: info.url, title: info.title, waited: Date.now() - start };
-        }
-      } catch {}
-      while (Date.now() - start < timeout) {
-        const info = await this.getPageInfo(tabId).catch(() => null);
-        if (info?.readyState === 'complete' && info.url && !info.url.startsWith('chrome://')) {
-          return { success: true, url: info.url, title: info.title, waited: Date.now() - start };
-        }
-        await new Promise(r => setTimeout(r, 40));
-      }
-      return { success: false, error: 'timeout waiting for page load', waited: Date.now() - start };
-    }
+    const norm = (u) => String(u || '').replace(/#.*$/, '').replace(/\/$/, '');
+    // 导航标记: 由 openUrl/navigateCurrent 登记, 30s 内有效
+    const nav = this._pendingNav?.get(tabId);
+    const navFresh = nav && Date.now() - nav.ts < 30000;
+    const navTarget = navFresh ? nav.url : null;
+    if (nav && !navFresh) this._pendingNav.delete(tabId);
+    const needTransition = !!navTarget || data.afterAction === true;
+    let sawLoading = false;
+    // 始终记录基线 URL: 快速导航可能在两次轮询之间就完成了(看不到 loading), 此时靠 URL 变化判定
+    const b0 = await this.getPageInfo(tabId).catch(() => null);
+    const baselineUrl = b0?.url || null;
+    const graceNoNav = data.noNavGrace != null ? +data.noNavGrace : 1500;   // 点击类动作: 超过此时间仍无 URL 变化则视为"无导航", 直接返回(不空等超时)
+    const stallGrace = data.stallGrace != null ? +data.stallGrace : 3000;   // DOM 就绪(interactive)后的宽限: 超过仍无 complete 则按部分完成返回
+    let interactiveAt = null;
+    let lastInfo = null;
     while (Date.now() - start < timeout) {
       const info = await this.getPageInfo(tabId).catch(() => null);
-      if (info?.readyState === 'complete' && info.url && !info.url.startsWith('chrome://')) {
-        return { success: true, url: info.url, title: info.title, waited: Date.now() - start };
+      if (info) {
+        lastInfo = info;
+        if (info.readyState === 'loading') sawLoading = true;
+        const notSystem = info.url && !info.url.startsWith('chrome://') && !info.url.startsWith('about:blank');
+        const complete = info.readyState === 'complete' && notSystem;
+        const urlHit = navTarget ? norm(info.url) === norm(navTarget) : (baselineUrl ? info.url !== baselineUrl : false);
+        if (complete && (!needTransition || sawLoading || urlHit)) {
+          if (nav) this._pendingNav.delete(tabId);
+          return {
+            success: true, url: info.url, title: info.title, waited: Date.now() - start,
+            ...(needTransition ? { transition: sawLoading ? 'loading-observed' : 'url-changed' } : {})
+          };
+        }
+        // DOM 就绪但 load 长期未触发(有挂起资源): 超过 stallGrace 按部分完成返回, 不空等整个 timeout
+        if (notSystem && info.readyState === 'interactive' && (!needTransition || sawLoading || urlHit)) {
+          if (interactiveAt == null) {
+            interactiveAt = Date.now();
+          } else if (Date.now() - interactiveAt >= stallGrace) {
+            if (nav) this._pendingNav.delete(tabId);
+            return {
+              success: true, partial: true, url: info.url, title: info.title,
+              readyState: info.readyState, waited: Date.now() - start,
+              note: `DOM 已就绪(interactive)但 load 事件超过 ${stallGrace}ms 未触发; 通常是有第三方资源挂起(被墙/慢请求), 已按可交互状态返回`
+            };
+          }
+        } else {
+          interactiveAt = null;
+        }
+        // 无导航目标的"动作后等待"(如点击按钮但不跳转): 短时间后不再空等
+        if (!navTarget && data.afterAction === true && !sawLoading && Date.now() - start > graceNoNav) {
+          return {
+            success: true, url: info.url, title: info.title, waited: Date.now() - start,
+            transition: 'no-navigation', note: `点击后 ${graceNoNav}ms 内未发生导航(可能是 AJAX 交互), 已按已完成返回`
+          };
+        }
       }
       await new Promise(r => setTimeout(r, 40));
     }
-    return { success: false, error: 'timeout waiting for page load', waited: Date.now() - start };
+    return {
+      success: false,
+      error: 'timeout waiting for page load',
+      waited: Date.now() - start,
+      ...(lastInfo?.readyState === 'interactive' ? {
+        partial: true, readyState: 'interactive', url: lastInfo.url,
+        note: '页面始终处于 interactive(load 事件被挂起资源阻塞), 可加 stallGrace 参数提前返回'
+      } : {}),
+      hint: navTarget ? `等待目标 URL: ${navTarget}` : (data.afterAction ? '等待导航发生(未观察到 loading 或 URL 变化)' : undefined)
+    };
   }
 
   // ============ 截图 / PDF ============
 
   async screenshot(tabId, data) {
-    const format = data?.format || 'png';
+    const format = this.normalizeImageFormat(data?.format || 'png');
     const quality = data?.quality || 80;
+    const vpState = await this.ensureViewport(tabId);
+    const windowInvisible = !!vpState?.applied;   // 窗口不可见: 截图改走 fromSurface:false
     // http 本地页: Page.captureScreenshot 在部分内核(http://127.0.0.1)可能挂起 → captureVisibleTab 快路径。
     // 但 captureVisibleTab 永远截【当前激活 tab】: 仅当目标 tab 就是激活 tab 时才允许走该路径,
     // 否则会把用户当前页面截走(串页+隐私)。后台 tab 一律走 CDP(Page.captureScreenshot 可精确指定 target)。
@@ -2182,9 +2299,14 @@ class ArkWeb {
       // 夸克内核 captureScreenshot 可能 >8s(渲染忙)且间歇性失败(渲染进程退化环境实测抖动明显), 8s 超时 + 重试一次再落守卫
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const shot = await this.cdp.sendWithTimeout(tabId, 'Page.captureScreenshot', { format, quality }, 8000);
+          // 窗口不可见/最小化时, 从合成器(默认 fromSurface:true)取帧会一直等不到新帧 → 超时。
+          // 第二轮(以及"已检测到窗口不可见"时)改为 fromSurface:false, 直接从渲染进程取图 —— 实测可稳定出图。
+          const fromSurface = !(attempt > 0 || windowInvisible);
+          const shot = await this.cdp.sendWithTimeout(tabId, 'Page.captureScreenshot', {
+            format, quality, ...(fromSurface ? {} : { fromSurface: false })
+          }, 8000);
           if (shot && typeof shot.data === 'string') {
-            return { success: true, method: 'cdp', dataUrl: `data:image/${format};base64,${shot.data}`, format, timestamp: Date.now() };
+            return { success: true, method: 'cdp', dataUrl: `data:image/${format};base64,${shot.data}`, format, fromSurface, timestamp: Date.now() };
           }
         } catch { /* 重试后仍失败 → 兜底守卫 */ }
         if (attempt === 0) await new Promise(r => setTimeout(r, 400));
@@ -2202,19 +2324,22 @@ class ArkWeb {
     }
     // fallback 包超时: captureVisibleTab 依赖窗口可见, 非前台时可能挂起; 失败返回结构化错误而非裸 throw
     try {
+      // captureVisibleTab 只接受 jpeg/png(webp 会直接抛参数错误) → 兜底路径降级为 jpeg
+      const fbFormat = (format === 'jpeg' || format === 'png') ? format : 'jpeg';
       const dataUrl = await Promise.race([
-        chrome.tabs.captureVisibleTab(null, { format, quality }),
+        chrome.tabs.captureVisibleTab(null, { format: fbFormat, quality }),
         new Promise((_, rej) => setTimeout(() => rej(new Error('captureVisibleTab timeout after 6000ms')), 6000))
       ]);
-      return { success: true, method: 'script', dataUrl, format, timestamp: Date.now() };
+      return { success: true, method: 'script', dataUrl, format: fbFormat, ...(fbFormat !== format ? { formatNote: `captureVisibleTab 不支持 ${format}, 已降级为 ${fbFormat}` } : {}), timestamp: Date.now() };
     } catch (e) {
       return { success: false, error: `截图失败(CDP 超时且 fallback 不可用, 可能窗口不可见): ${e.message}`, method: 'failed' };
     }
   }
 
   async screenshotFull(tabId, data) {
-    const format = data?.format || 'png';
+    const format = this.normalizeImageFormat(data?.format || 'png');
     const quality = data?.quality || 80;
+    await this.ensureViewport(tabId);
     if (tabId == null || !await this.cdp.tryAttach(tabId)) return { error: '整页截图需要 CDP(请在 popup 中启用调试)' };
     try {
       // 外层看门狗: 渲染忙/弹窗阻塞时自动恢复, 不悬空到请求层超时
@@ -2228,6 +2353,7 @@ class ArkWeb {
   async screenshotElement(tabId, data) {
     const { selector } = data;
     if (!selector) return { error: 'selector is required' };
+    await this.ensureViewport(tabId);
     if (tabId == null || !await this.cdp.tryAttach(tabId)) return { error: '元素截图需要 CDP(请在 popup 中启用调试)' };
     const rect = await this.cdp.elementRect(tabId, selector);
     if (!rect) return { error: 'Element not found' };
@@ -2245,6 +2371,7 @@ class ArkWeb {
       let shot = null;
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
+          // 带 clip 必须 fromSurface:true(内核限制), 故两次尝试参数一致, 仅重试
           shot = await this.cdp.sendWithTimeout(tabId, 'Page.captureScreenshot', { format: 'png', clip, captureBeyondViewport: true }, 15000);
           if (shot && typeof shot.data === 'string') break;
         } catch (e) {
@@ -2312,9 +2439,109 @@ class ArkWeb {
    * - full=false 视口截图(默认)；full=true 整页截图
    * - selector 可限定锚点范围；maxElements 限制数量(默认50, 上限120)
    */
+  /** 最小化/不可见窗口的标签页 innerWidth=0 → 布局塌陷(元素尺寸全为 0、截图空白)。
+   *  自动施加"虚拟视口"(仅作用于该 tab, 不改动用户可见窗口), 让视觉与坐标操作在窗口最小化时依然可用。
+   *  实测夸克最小化时可能上报 45x14 等异常小值而非 0, 故以 <100 判定"不可见"。
+   *  探测结果缓存 3s, 避免每条命令都多一次 evaluate。 */
+  async ensureViewport(tabId, opts = {}) {
+    if (tabId == null) return { applied: false };
+    const now = Date.now();
+    const cached = this._viewportProbe.get(tabId);
+    if (!opts.force && cached && now - cached.ts < 3000) return cached.result;
+    const TINY = 100;   // 视口任一维 <100 视为窗口不可见(最小化上报异常小值)
+    let result = { applied: false };
+    try {
+      const probe = await this.evaluateJS(tabId, { code: '({ w: innerWidth, h: innerHeight })', timeout: 4000 });
+      const vp = probe.success ? probe.result : null;
+      if (vp && (vp.w === 0 || vp.h === 0 || vp.w < TINY || vp.h < TINY || opts.allowResidual)) {
+        if (await this.cdp.tryAttach(tabId)) {
+          const cfg = { width: opts.width || 1440, height: opts.height || 900, dpr: 1, mobile: false };
+          await this.cdp.send(tabId, 'Emulation.setDeviceMetricsOverride', {
+            width: cfg.width, height: cfg.height, deviceScaleFactor: cfg.dpr, mobile: false
+          });
+          // 记入 deviceOverrides, 使 /device/clear 能走正常清理与校验路径
+          this.deviceOverrides.set(tabId, { config: cfg, origUA: null, synthetic: true });
+          result = { applied: true, viewport: cfg, reason: `窗口不可见(视口 ${vp.w}x${vp.h}), 已自动施加虚拟视口` };
+          console.log(`[ArkWeb] ${result.reason} → ${cfg.width}x${cfg.height} (tab ${tabId})`);
+        } else {
+          result = { applied: false, warning: '窗口不可见且 CDP 未授权, 无法施加虚拟视口; 请在插件 popup 点「启用调试」' };
+        }
+      }
+    } catch { /* 探测失败则按原流程 */ }
+    this._viewportProbe.set(tabId, { ts: now, result });
+    return result;
+  }
+
+  /** 等待页面"稳定"(替代固定 sleep): 连续 quiet 毫秒没有 DOM 变动且 readyState=complete 即认为稳定。
+   *  实测价值: 百度等站点先渲染窄版布局再切桌面样式, 加载完成后立刻快照会拍到"过渡态"(元素坐标全错)。
+   *  参数: timeout(默认15s) / quiet(默认500ms, 连续静默时长) / maxMutations(可选上限) */
+  async waitForStable(tabId, data = {}) {
+    if (tabId == null) return { error: 'No active tab' };
+    const timeout = data.timeout || 15000;
+    const quiet = Math.min(Math.max(+(data.quiet || 500), 100), 5000);
+    const start = Date.now();
+    try {
+      await this.runInPage(tabId, () => {
+        window.__arkMut = 0;
+        try { if (window.__arkMO) window.__arkMO.disconnect(); } catch { /* ignore */ }
+        window.__arkMO = new MutationObserver(() => { window.__arkMut = (window.__arkMut || 0) + 1; });
+        window.__arkMO.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+        return true;
+      });
+    } catch (e) {
+      return { success: false, error: `注入变动观察器失败: ${e.message}` };
+    }
+    let lastMut = null;
+    let lastChange = Date.now();
+    while (Date.now() - start < timeout) {
+      const r = await this.evaluateJS(tabId, { code: '({ m: (window.__arkMut || 0), rs: document.readyState })', timeout: 4000 }).catch(() => null);
+      const mut = r?.success ? r.result?.m : null;
+      const rs = r?.success ? r.result?.rs : null;
+      if (mut !== lastMut) { lastMut = mut; lastChange = Date.now(); }
+      const quietFor = Date.now() - lastChange;
+      if (rs === 'complete' && quietFor >= quiet) {
+        return { success: true, mutations: lastMut || 0, quietFor, waited: Date.now() - start };
+      }
+      if (data.maxMutations && (lastMut || 0) > data.maxMutations) {
+        return { success: false, error: `页面变动过多(${lastMut}), 未稳定`, mutations: lastMut, waited: Date.now() - start };
+      }
+      await new Promise(r => setTimeout(r, 60));
+    }
+    return { success: false, error: 'timeout waiting for stable', mutations: lastMut || 0, waited: Date.now() - start };
+  }
+
+  /** 出错页/系统页守卫: chrome-error:// (拿不到站点时的错误页) 与 about:blank / chrome:// 页面
+   *  的渲染进程状态异常, Runtime.evaluate 会一直挂到超时(实测 12s)。提前识别直接给可操作错误。 */
+  async assertUsableTab(tabId) {
+    if (tabId == null) return { ok: false, error: 'No active tab' };
+    let url = '';
+    try { const t = await chrome.tabs.get(tabId); url = t?.url || ''; } catch { return { ok: false, error: `标签页 ${tabId} 不存在(可能已关闭)` }; }
+    if (url.startsWith('chrome-error://') || url.startsWith('chrome://') || url.startsWith('devtools://') || url === 'about:blank' || url === '') {
+      return {
+        ok: false,
+        url,
+        error: `目标标签页不可用于视觉采集: ${url || 'about:blank'}`,
+        hint: url.startsWith('chrome-error')
+          ? '这是浏览器的错误页(站点不可达/被拦截/域名解析失败)。换可达站点, 或先 POST /open + /wait-for-load 再采。'
+          : '系统页 / 空白页不支持内容脚本与截图, 请先导航到目标页面。'
+      };
+    }
+    return { ok: true, url };
+  }
+
   async visionSnapshot(tabId, data = {}) {
     if (tabId == null) return { error: 'No active tab' };
-    const format = (data.format === 'jpeg' || data.format === 'jpg') ? 'jpeg' : 'png';
+    const usable = await this.assertUsableTab(tabId);
+    if (!usable.ok) return usable;
+    const vpFix = await this.ensureViewport(tabId);
+    // settle=1: 先等页面稳定再采集(避免拍到"过渡态": 部分站点先渲染窄版布局再切桌面样式)
+    let settleInfo = null;
+    if (data.settle) {
+      try {
+        settleInfo = await this.waitForStable(tabId, { quiet: data.settleQuiet || 400, timeout: data.settleTimeout || 6000 });
+      } catch { /* 稳定等待失败不阻断采集 */ }
+    }
+    const format = this.normalizeImageFormat(data.format);
     const quality = data.quality != null ? Math.min(Math.max(+data.quality, 10), 100) : 80;
     const annotate = !!(data.annotate || data.annotated);
     const full = !!data.full;
@@ -2328,12 +2555,16 @@ class ArkWeb {
     try {
       collected = await this.runInPage(tabId, (selStr, max, doAnnotate) => {
         document.querySelectorAll('.ark-vision-annotate').forEach(e => e.remove());
+        // 清除上一轮 ref 标记: 保证 [data-ark-ref] 始终只对应最新一次快照
+        document.querySelectorAll('[data-ark-ref]').forEach(e => e.removeAttribute('data-ark-ref'));
         const sel = selStr || 'a[href], button, input:not([type="hidden"]), select, textarea, [role="button"], [role="link"], summary, [onclick], [contenteditable="true"], [tabindex]:not([tabindex="-1"])';
         let candidates;
         try { candidates = Array.from(document.querySelectorAll(sel)); }
         catch { candidates = Array.from(document.querySelectorAll('a, button, input, select, textarea, [role="button"]')); }
         const out = [];
         const seen = new Set();
+        const picked = new Set();   // 已收录元素, 用于折叠嵌套噪声
+        const PRIMARY = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA']);
         let idx = 0;
         for (const el of candidates) {
           if (out.length >= max) break;
@@ -2346,12 +2577,24 @@ class ArkWeb {
           if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
           // 视口过滤：允许轻微越界，但完全在视口外的不可见元素跳过(全页模式也仅取视口附近，避免 1k+ 噪声)
           if (rect.bottom < -40 || rect.top > window.innerHeight + 300 || rect.right < -40 || rect.left > window.innerWidth + 300) continue;
+          // 折叠嵌套噪声: <button><span>登录</span></button> 这类会被查两次(外观重叠、编号翻倍、浪费 token)。
+          // 规则: 非主要交互标签(A/BUTTON/INPUT/SELECT/TEXTAREA)若其祖先已被收录, 则跳过;
+          //       主要交互标签始终保留(如 <div role=button> 里包着真正的 <a>, 链接语义不能丢)。
+          if (!PRIMARY.has(el.tagName)) {
+            let anc = el.parentElement, contained = false;
+            while (anc) { if (picked.has(anc)) { contained = true; break; } anc = anc.parentElement; }
+            if (contained) continue;
+          }
+          picked.add(el);
           // 额外可见性：elementFromPoint 抽样(中心点必须命中自身或子元素)
           // 轻量，不做全量 hit-test，仅过滤被完全遮挡的(被父容器 overflow hidden 裁掉的不算)
           idx++;
           const text = (el.innerText || el.textContent || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ').slice(0, 80);
           const role = el.getAttribute('role') || (el.tagName === 'A' ? 'link' : el.tagName === 'BUTTON' ? 'button' : el.tagName === 'INPUT' ? (el.type || 'input') : el.tagName.toLowerCase());
           const name = el.getAttribute('aria-label') || text || el.name || el.id || '';
+          // ref 系操作依赖的临时标记: click-ref/fill-ref/hover-ref 直接查 [data-ark-ref="N"],
+          // 因此即使页面滚动 / 遮罩变化 / full 模式下元素在视口外, ref 操作依然准确
+          el.setAttribute('data-ark-ref', String(idx));
           const item = {
             ref: idx,
             tag: el.tagName,
@@ -2362,6 +2605,31 @@ class ArkWeb {
             center: { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) },
             visible: true
           };
+          // ---- 语义补强: 只在非默认值时输出, 控制 token 体积 ----
+          const type = (el.type || '').toLowerCase();
+          if (el.disabled) item.disabled = true;
+          if (el.tagName === 'INPUT' && type) item.inputType = type;
+          if ((type === 'checkbox' || type === 'radio') && el.checked) item.checked = true;
+          if (el.placeholder) item.placeholder = String(el.placeholder).slice(0, 40);
+          if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.value && type !== 'password') {
+            item.value = String(el.value).slice(0, 40);
+          }
+          if ((el.tagName === 'A' && el.getAttribute('href') && el.getAttribute('href').length > 1) || el.getAttribute('aria-expanded') != null) {
+            const href = el.getAttribute('href');
+            if (href && href.length > 1 && !href.startsWith('javascript:')) item.href = href.slice(0, 120);
+            const expanded = el.getAttribute('aria-expanded');
+            if (expanded != null) item.expanded = expanded === 'true';
+          }
+          // 是否在视口内(不在则截图看不到, 需要先滚动)
+          const inView = rect.top >= -20 && rect.bottom <= window.innerHeight + 20 && rect.left >= -20 && rect.right <= window.innerWidth + 20;
+          if (!inView) item.inViewport = false;
+          // 遮挡检测: 中心点最上层元素不是自己也不是自己的后代 → 被别的元素盖住(点了会打到遮罩)
+          try {
+            const px = Math.min(Math.max(rect.x + rect.width / 2, 0), Math.max(window.innerWidth - 1, 0));
+            const py = Math.min(Math.max(rect.y + rect.height / 2, 0), Math.max(window.innerHeight - 1, 0));
+            const hit = inView ? document.elementFromPoint(px, py) : null;
+            if (hit && hit !== el && !el.contains(hit)) item.occluded = true;
+          } catch { /* ignore */ }
           out.push(item);
           if (doAnnotate) {
             // 仅对视口内元素标注(否则气泡在视口外，截图不可见)
@@ -2409,20 +2677,295 @@ class ArkWeb {
       return { success: false, error: shot?.error || 'screenshot failed', url: collected?.url, title: collected?.title, viewport: collected?.viewport, elements: collected?.elements || [], annotateNote };
     }
 
-    return {
+    // 紧凑输出(compact): 元素由对象变为定长数组, 实测省 ~70% token。
+    // 列顺序: ref, tag, role, x, y, w, h, flags, label
+    // flags 字母含义: d=disabled c=checked o=occluded(被遮挡) v=不在视口 f=已填值
+    const useCompact = !!(data.compact || data.som === 'compact');
+    const body = {
       success: true,
       dataUrl: shot.dataUrl,
       format,
       url: collected.url,
       title: collected.title,
       viewport: collected.viewport,
-      elements: collected.elements,
       full: !!full,
       annotate: !!annotate && !full,
       ...(annotateNote ? { annotateNote } : {}),
+      ...(vpFix.applied ? { autoViewport: vpFix.viewport, autoViewportNote: vpFix.reason } : {}),
+      ...(settleInfo ? { settle: { success: settleInfo.success, mutations: settleInfo.mutations, quietFor: settleInfo.quietFor } } : {}),
+      ...(vpFix.warning ? { viewportWarning: vpFix.warning } : {}),
       timestamp: Date.now(),
       elapsed: Date.now() - t0
     };
+    if (useCompact) {
+      body.elementsFormat = 'compact';
+      body.columns = ['ref', 'tag', 'role', 'x', 'y', 'w', 'h', 'flags', 'label'];
+      body.columnsNote = 'flags: d=disabled c=checked o=occluded v=非视口内 f=已填值';
+      body.elements = collected.elements.map(e => {
+        const f = (e.disabled ? 'd' : '') + (e.checked ? 'c' : '') + (e.occluded ? 'o' : '') + (e.inViewport === false ? 'v' : '') + (e.value ? 'f' : '');
+        return [e.ref, e.tag, e.role, e.rect.x, e.rect.y, e.rect.width, e.rect.height, f, (e.text || e.name || '').slice(0, 60)];
+      });
+    } else {
+      body.elements = collected.elements;
+    }
+    return body;
+  }
+
+  /** 重载插件代码(改完 extension/ 后自我更新): 先回响应再重载, 否则 WS 消息来不及发出。
+   *  重载后 WS 会自动重连, 但 CDP 授权失效, 需在 popup 重新点「启用调试」。 */
+  reloadExtension() {
+    const version = chrome.runtime.getManifest().version;
+    setTimeout(() => { try { chrome.runtime.reload(); } catch (e) { console.error('[ArkWeb] 重载失败:', e); } }, 400);
+    return {
+      success: true,
+      message: '插件将在 400ms 后重载。WS 会自动重连(约数秒), CDP 授权失效需重新点 popup 的「启用调试」',
+      currentVersion: version
+    };
+  }
+
+  // ============ 视觉引用(ref)操作 —— 按 SoM 编号直接操作, 无需坐标换算 ============
+  // 快照采集时会给每个元素打 [data-ark-ref="N"] 临时标记, 下列方法据此定位,
+  // 因此页面滚动 / 元素位移 / 遮挡变化后依然准确; 标记会在下次快照时统一清除。
+
+  /** 图片格式归一: png / jpeg / webp(webp 体积最小, 视觉模型最省 token) */
+  normalizeImageFormat(fmt) {
+    const f = String(fmt || '').toLowerCase();
+    if (f === 'jpeg' || f === 'jpg') return 'jpeg';
+    if (f === 'webp') return 'webp';
+    return 'png';
+  }
+
+  /** ref 编号 → CSS 选择器 */
+  refSelector(ref) {
+    const n = parseInt(ref, 10);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return `[data-ark-ref="${n}"]`;
+  }
+
+  /** ref → 选择器, 失败时返回带指引的错误对象 */
+  resolveRef(data = {}, action = '操作') {
+    const sel = this.refSelector(data.ref);
+    if (!sel) {
+      return {
+        error: `ref 必须是快照返回的正整数编号(先拍一次 GET /snapshot?annotate=1, 用 elements[i].ref)`,
+        hint: `拿到编号后: POST /act {action:"${action}", ref:3}`,
+        ref: data.ref ?? null
+      };
+    }
+    return { selector: sel };
+  }
+
+  async clickRef(tabId, data = {}) {
+    const r = this.resolveRef(data, 'clickRef');
+    if (r.error) return r;
+    const out = await this.clickElement(tabId, { selector: r.selector, fast: data.fast, speed: data.speed });
+    return { ...out, ref: +data.ref, refSelector: r.selector };
+  }
+
+  async hoverRef(tabId, data = {}) {
+    const r = this.resolveRef(data, 'hoverRef');
+    if (r.error) return r;
+    const out = await this.hoverElement(tabId, { selector: r.selector, fast: data.fast });
+    return { ...out, ref: +data.ref, refSelector: r.selector };
+  }
+
+  async fillRef(tabId, data = {}) {
+    const r = this.resolveRef(data, 'fillRef');
+    if (r.error) return r;
+    if (data.value === undefined) return { error: 'value is required', hint: 'POST /act {action:"fillRef", ref:2, value:"alice"}' };
+    // 复用 fill-form 的 React 受控输入兼容路径(原生 setter + input 事件)
+    const out = await this.fillForm(tabId, { fields: [{ selector: r.selector, value: data.value }] });
+    return { ...out, ref: +data.ref, refSelector: r.selector };
+  }
+
+  /** 读取 ref 指向元素的完整文本/值/关键属性 —— 小字读不清时比放大截图更省 token */
+  async readTextRef(tabId, data = {}) {
+    const r = this.resolveRef(data, 'readText');
+    if (r.error) return r;
+    const out = await this.runInPage(tabId, (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      const attr = (n) => el.getAttribute(n) || undefined;
+      return {
+        tag: el.tagName,
+        text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 4000),
+        value: el.value !== undefined && el.value !== null ? String(el.value).slice(0, 200) : undefined,
+        disabled: el.disabled !== undefined ? !!el.disabled : undefined,
+        checked: el.checked !== undefined ? !!el.checked : undefined,
+        href: attr('href'), src: attr('src'), alt: attr('alt'), title: attr('title'), ariaLabel: attr('aria-label')
+      };
+    }, [r.selector]);
+    if (!out) return { success: false, error: `ref ${data.ref} 对应元素已不存在(页面已变化, 请重新拍快照)`, ref: +data.ref };
+    return { success: true, ref: +data.ref, refSelector: r.selector, ...out };
+  }
+
+  /** 裁剪放大截图: 读不清的小字/图表细节/图标含义。ref 或 selector 或显式坐标均可。
+   *  scale 默认 2(最大 5); webp 格式最省 token。CDP 不可用时降级为元素截图(不放大)。 */
+  async zoomShot(tabId, data = {}) {
+    if (tabId == null) return { error: 'No active tab' };
+    const vpZ = await this.ensureViewport(tabId);
+    const invisibleZ = !!vpZ?.applied;
+    const format = this.normalizeImageFormat(data.format);
+    const quality = data.quality != null ? Math.min(Math.max(+data.quality, 10), 100) : 90;
+    const scale = Math.min(Math.max(+(data.scale || 2), 1), 5);
+    const sel = data.selector || this.refSelector(data.ref);
+    if (!sel && data.x == null) return { error: '需要 ref / selector / x,y,width,height 之一', hint: 'POST /act {action:"zoom", ref:3, scale:3}' };
+
+    // clip 采用与 screenshotElement 一致的视口坐标系(已 scrollIntoView, 元素必在视口内)
+    let clip;
+    let targetText;
+    const clamp = (v, min) => Math.max(min, Math.round(v));
+    if (sel) {
+      const r = await this.evaluateJS(tabId, { code: `(() => {
+        const el = document.querySelector(${JSON.stringify(sel)});
+        if (!el) return null;
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        const b = el.getBoundingClientRect();
+        return { x: b.x, y: b.y, width: b.width, height: b.height, text: (el.innerText || el.textContent || '').trim().slice(0, 60) };
+      })()`, timeout: 6000 });
+      if (!r.success || !r.result) return { success: false, error: `未找到目标元素(selector=${sel})`, ref: data.ref ?? null };
+      const pad = 6; // 外扩, 防止文字贴边被裁
+      clip = {
+        x: clamp(r.result.x - pad, 0),
+        y: clamp(r.result.y - pad, 0),
+        width: Math.max(8, Math.round(r.result.width + pad * 2)),
+        height: Math.max(8, Math.round(r.result.height + pad * 2)),
+        scale
+      };
+      targetText = r.result.text;
+    } else {
+      clip = {
+        x: clamp(+data.x, 0),
+        y: clamp(+data.y, 0),
+        width: Math.max(8, Math.round(+data.width || 240)),
+        height: Math.max(8, Math.round(+data.height || 120)),
+        scale
+      };
+    }
+
+    try {
+      if (!await this.cdp.tryAttach(tabId)) throw new Error('CDP 未授权(请在插件 popup 点「启用调试」)');
+      // 注意: 带 clip 的截图必须 fromSurface:true(内核会拒绝 "Only screenshots from surface are allowed"),
+      // 因此这里不能用 fromSurface:false 兜底最小化窗口, 只能重试。
+      const base = { format, quality, clip, captureBeyondViewport: true };
+      let shot = null;
+      let lastErr = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          shot = await this.cdp.sendWithTimeout(tabId, 'Page.captureScreenshot', base, attempt > 0 ? 10000 : 20000);
+          if (shot && typeof shot.data === 'string') break;
+        } catch (e) { lastErr = e; }
+        if (attempt === 0) await new Promise(r => setTimeout(r, 300));
+      }
+      if (!shot || typeof shot.data !== 'string') throw new Error(lastErr?.message || '截图未返回数据');
+      return {
+        success: true,
+        dataUrl: `data:image/${format};base64,${shot.data}`,
+        format, scale, clip,
+        ...(targetText ? { text: targetText } : {}),
+        timestamp: Date.now()
+      };
+    } catch (e) {
+      // 降级: 元素截图(无法放大, 但至少给出该区域清爽裁剪)
+      if (sel) {
+        const fb = await this.screenshotElement(tabId, { selector: sel });
+        if (fb && fb.success) return { ...fb, scale: 1, degraded: `CDP 裁剪放大失败(${e.message}), 已降级为元素截图` };
+      }
+      return { success: false, error: e.message };
+    }
+  }
+
+  /** 可见文本块 + 紧致坐标(免截图"读"页面): 用于读小字/取文案/交叉校验截图理解。
+   *  用 Range 取文本节点自身的紧致盒子(而非父容器), 因此坐标可直接与 /mouse 对齐。 */
+  async textMap(tabId, data = {}) {
+    if (tabId == null) return { error: 'No active tab' };
+    await this.ensureViewport(tabId);
+    const minLen = Math.min(Math.max(+(data.minLen || 2), 1), 50);
+    const max = Math.min(Math.max(+(data.max || 200), 1), 1000);
+    const out = await this.runInPage(tabId, (minL, maxN) => {
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const rows = [];
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const raw = node.nodeValue || '';
+        const t = raw.replace(/\s+/g, ' ').trim();
+        if (t.length < minL) continue;
+        const el = node.parentElement;
+        if (!el) continue;
+        const st = getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') continue;
+        let r;
+        try {
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          r = range.getBoundingClientRect();
+        } catch { continue; }
+        if (r.width < 2 || r.height < 2) continue;
+        rows.push({
+          t: t.slice(0, 300),
+          x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+          tag: el.tagName, fs: Math.round(parseFloat(st.fontSize) || 0),
+          inView: r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw
+        });
+        if (rows.length >= maxN) break;
+      }
+      return rows;
+    }, [minLen, max]);
+    const blocks = out || [];
+    return {
+      success: true, count: blocks.length,
+      blocks: (data.inViewOnly ? blocks.filter(b => b.inView) : blocks)
+    };
+  }
+
+  /** 按可见文本查找元素(不点击): 返回最贴合文本的若干元素(面积最小者优先) + 快照 ref(若有) */
+  async findText(tabId, data = {}) {
+    if (tabId == null) return { error: 'No active tab' };
+    const needle = String(data.text || data.query || '').trim();
+    if (!needle) return { error: 'text is required', hint: 'POST /act {action:"find", text:"登录"}' };
+    await this.ensureViewport(tabId);
+    const limit = Math.min(Math.max(+(data.limit || 8), 1), 50);
+    const out = await this.runInPage(tabId, (q, max, exact) => {
+      const hits = [];
+      for (const el of document.querySelectorAll('body *')) {
+        const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!t || t.length > q.length * 8) continue;          // 过长的容器文本直接跳过(噪声)
+        if (exact ? t !== q : !t.includes(q)) continue;
+        const st = getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        const ref = el.getAttribute('data-ark-ref');
+        hits.push({
+          text: t.slice(0, 120), tag: el.tagName, role: el.getAttribute('role') || null,
+          x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height),
+          center: { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) },
+          ref: ref ? +ref : null,
+          clickable: !!(el.onclick || el.tagName === 'A' || el.tagName === 'BUTTON' || el.getAttribute('role') === 'button'),
+          area: r.width * r.height
+        });
+      }
+      // 排序: 可点击优先 → 有 ref(即上次快照里出现过)优先 → 面积小者优先(越接近文本叶子节点)
+      // 这样"按文本找按钮"时, 真正的可点元素总是排在最前面, 不会被同名容器 DIV 挤掉
+      hits.sort((a, b) =>
+        (b.clickable - a.clickable) ||
+        ((b.ref ? 1 : 0) - (a.ref ? 1 : 0)) ||
+        (a.area - b.area)
+      );
+      // 去重(同文本同位置)
+      const seenKey = new Set();
+      const dedup = [];
+      for (const h of hits) {
+        const k = `${h.text}|${h.x}|${h.y}`;
+        if (seenKey.has(k)) continue;
+        seenKey.add(k);
+        dedup.push(h);
+        if (dedup.length >= max) break;
+      }
+      return dedup.map(({ area, ...rest }) => rest);
+    }, [needle, limit, !!data.exact]);
+    return { success: true, query: needle, matches: (out || []).length, results: out || [] };
   }
 
   // ============ Cookie ============
@@ -2881,41 +3424,33 @@ class ArkWeb {
 
     if (await this.cdp.tryAttach(tabId)) {
       let errors = await pairClear();
-      // 校验恢复: override 已清除 = innerWidth 与最后一次 set 的宽度显著不同(中间态 origViewport 不可靠,
-      // 连续多次 set 时它记录的是上一次的 set 宽度, 恢复后的自然窗口宽度与之必然不符)
-      const beforeWidth = await this.cdp.evaluate(tabId, 'innerWidth').then(r => r?.result, () => null).catch(() => null);
-      const ok = async () => {
+      // 校验语义: clearDevice 的目标是"移除设备模拟"(移动 UA / mobile / dpr)。
+      // 夸克内核下 Emulation.clearDeviceMetricsOverride 可能不还原视口宽度(实测 UA/dpr 恢复了但视口残留
+      // device 宽度), 窗口不可见时更不可靠。因此不以 innerWidth 是否变化作为成败判据, 而以"移动 UA 是否移除"
+      // 为准; 视口可用性由下面的归一化步骤兜底保证。
+      const mobileGone = async () => {
         try {
-          const cur = (await this.cdp.evaluate(tabId, 'innerWidth').catch(() => null))?.result;
-          if (typeof cur !== 'number') return false;
-          const setW = prev?.config?.width;
-          if (setW) return Math.abs(cur - setW) > setW * 0.05;   // override 已清 → 明显不同于 set 宽度
-          return beforeWidth ? Math.abs(cur - beforeWidth) < beforeWidth * 0.1 : true; // prev 缺失兜底
+          const r = await this.cdp.evaluate(tabId, '({ ua: navigator.userAgent, w: innerWidth })').catch(() => null);
+          const cur = r?.result;
+          if (!cur || typeof cur.w !== 'number') return false;
+          return !/iPhone|Android|Mobile|iPad/i.test(cur.ua || '');
         } catch { return false; }
       };
-      if (errors.length === 0 && (!await ok() || prevMissing)) {
-        // 已知坑: clear 对未 armed 的 session 是 no-op(成功但无效)。
-        // 自愈: detach → 重新 attach → set 任意值(使 session armed) → 成对 clear
-        // prev 缺失时同样触发: 残留 UA/metrics 只能通过 detach 清空
-        console.log('[ArkWeb] clearDevice 视口未恢复或记录缺失, 执行 armed-session 自愈(detach→attach→set→clear)');
+      // 自愈: prev 缺失(可能残留 UA/metrics)或移动 UA 未清除 → 用 detach 彻底重置 session 级 override
+      if (errors.length === 0 && (!await mobileGone() || prevMissing)) {
+        console.log('[ArkWeb] clearDevice 移动 UA 未清除或记录缺失, 执行 session 重置自愈(detach→attach→clear)');
         try {
           await this.cdp.detach(tabId);
           await new Promise(r => setTimeout(r, 300));
           if (await this.cdp.tryAttach(tabId)) {
-            await this.cdp.send(tabId, 'Emulation.setDeviceMetricsOverride', { width: 777, height: 812, deviceScaleFactor: 1, mobile: false }).catch(() => {});
-            // 夸克等内核渲染慢: 等待 override 生效再清除
-            await new Promise(r => setTimeout(r, 500));
-            errors = await pairClear();
-            // 自愈后必须校验: 未恢复(如 clear 仍为 no-op)不静默成功
+            await new Promise(r => setTimeout(r, 200));
+            errors = await pairClear();   // detach 已清 session 级 override, 这里再补一次成对 clear 兜底
             let restored = false;
             for (let i = 0; i < 10; i++) {
-              if (await ok()) { restored = true; break; }
-              await new Promise(r => setTimeout(r, 500));
+              if (await mobileGone()) { restored = true; break; }
+              await new Promise(r => setTimeout(r, 400));
             }
-            if (!restored) {
-              const cur = await this.cdp.evaluate(tabId, 'innerWidth').then(r => r?.result, () => null).catch(() => null);
-              errors.push(`self-heal verify failed: innerWidth=${cur}, setWidth=${prev?.config?.width ?? beforeWidth}`);
-            }
+            if (!restored) errors.push('self-heal: 移动 UA 未清除(该内核可能不支持完整清除设备模拟)');
           } else {
             errors.push('re-attach failed');
           }
@@ -2928,7 +3463,47 @@ class ArkWeb {
         console.log('[ArkWeb] clearDevice 部分失败:', errors.join(' | '));
         return { success: false, cleared: false, errors, prev: prev ? { config: prev.config, origViewport: prev.origViewport } : null };
       }
-      return { success: true, cleared: true, method: 'cdp', prev: prev ? { config: prev.config, origViewport: prev.origViewport } : null };
+      // 视口还原校验: 夸克内核 Emulation.clearDeviceMetricsOverride 可能不还原视口宽高
+      // (实测带 <meta viewport> 的页面首次 clear 残留设备宽度 390x844, UA/dpr 已恢复)。
+      // 注意: 不可用 detach→attach 重置 —— 无用户手势时会使 CDP 授权失效(throttled),
+      // 引发后续命令降级与 tab 路由异常。改用"写回原始视口"的软还原:
+      // ① clear 后探测 → ② 可见但残留设备宽度则 setDeviceMetricsOverride 写回 set 前记录的
+      // 原始视口(幂等: 再次 clear 不清掉也只停留在正确值) → ③ 窗口不可见或写回失败则虚拟视口兜底。
+      let viewportFix = null;
+      try {
+        this._viewportProbe.delete(tabId);
+        const probeVP = async () => {
+          const p = await this.evaluateJS(tabId, { code: '({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio })', timeout: 3000 }).catch(() => null);
+          return p?.success && p.result && typeof p.result.w === 'number' ? p.result : null;
+        };
+        const devW = prev?.config?.width;
+        // 异常视口判定: 0/极小值(最小化上报异常小值, 实测夸克 45x14)或残留 device 宽度均视为需要修复
+        const TINY = 100;
+        const isBad = (v) => !!v && (v.w === 0 || v.h === 0 || v.w < TINY || v.h < TINY || (devW != null && v.w === devW));
+        await new Promise(r => setTimeout(r, 350));
+        let vp = await probeVP();
+        // ② 可见但残留 device 宽度: 写回原始视口(软还原)
+        if (isBad(vp) && vp.w !== 0) {
+          const ow = prev?.origViewport?.w, oh = prev?.origViewport?.h, od = prev?.origViewport?.dpr;
+          // 仅当记录的原始视口看起来有效(非最小化异常小值)时才写回; 否则交给 ③ 虚拟视口兜底
+          if (ow > TINY && oh > TINY) {
+            try {
+              await this.cdp.send(tabId, 'Emulation.setDeviceMetricsOverride', {
+                width: ow, height: oh, deviceScaleFactor: od || 1, mobile: false
+              });
+              console.log(`[ArkWeb] clearDevice 视口残留 ${vp.w}x${vp.h}, 已写回原始视口 ${ow}x${oh} dpr=${od}`);
+              viewportFix = { method: 'restore-original', viewport: { width: ow, height: oh, dpr: od } };
+            } catch (e) { errors.push(`viewport: restore failed: ${e.message}`); }
+          }
+        }
+        // ③ 仍残留(窗口不可见/无法写回): 虚拟视口兜底
+        vp = await probeVP();
+        if (isBad(vp)) {
+          const got = await this.ensureViewport(tabId, { force: true, allowResidual: true });
+          if (got?.applied) viewportFix = { method: 'virtual', viewport: got.viewport };
+        }
+      } catch { /* ignore */ }
+      return { success: true, cleared: true, method: 'cdp', prev: prev ? { config: prev.config, origViewport: prev.origViewport } : null, ...(viewportFix ? { viewportRestore: viewportFix } : {}) };
     }
     try {
       await chrome.tabs.setZoomSettings(tabId, { mode: 'automatic' });
@@ -2949,6 +3524,16 @@ class ArkWeb {
       catch (e) { r[name] = { success: false, error: e.message }; }
     };
     await safe('device', () => this.clearDevice(tabId).then(x => x?.success ? { success: true, cleared: true } : x));
+    // 视觉残留: SoM 编号气泡 + ref 标记(都不应留在页面上)
+    await safe('visionRefs', async () => {
+      const cleared = await this.runInPage(tabId, () => {
+        document.querySelectorAll('.ark-vision-annotate').forEach(e => e.remove());
+        const marked = document.querySelectorAll('[data-ark-ref]');
+        marked.forEach(e => e.removeAttribute('data-ark-ref'));
+        return marked.length;
+      }).catch(() => null);
+      return { success: true, cleared: cleared ?? 0 };
+    });
     await safe('media', async () => {
       if (await this.cdp.tryAttach(tabId)) {
         await this.cdp.send(tabId, 'Emulation.setEmulatedMedia', { features: [] });
@@ -3625,6 +4210,9 @@ class ArkWeb {
         case 'set-cookie': sendResponse(await this.setCookie(data || {})); break;
         case 'cdp-attach-all': sendResponse(await this.attachAllTabs()); break;
         case 'cdp-detach-all': sendResponse(await this.cdp.detachAll().then(() => ({ success: true }))); break;
+        // 连接配置(popup 修改 WS 主机/端口/令牌)
+        case 'get-config': sendResponse(await this.loadWsConfig()); break;
+        case 'set-config': sendResponse(await this.saveWsConfig(data || {})); break;
         case 'content-script-loaded': sendResponse({ ok: true }); break;
         default: sendResponse({ error: `Unknown message type: ${type}` });
       }

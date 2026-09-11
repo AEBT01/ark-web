@@ -296,6 +296,24 @@
 
     <!-- 工具面板 -->
     <div class="panel" id="panel-tools">
+      <div class="section-title">连接配置 (Bridge Server)</div>
+      <div class="card" style="font-size:12px;line-height:1.7">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <span style="width:56px;color:#8b949e">主机</span>
+          <input id="wsHost" style="flex:1;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;padding:4px 6px;font-size:12px" placeholder="127.0.0.1">
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <span style="width:56px;color:#8b949e">WS 端口</span>
+          <input id="wsPort" style="flex:1;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;padding:4px 6px;font-size:12px" placeholder="9334">
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+          <span style="width:56px;color:#8b949e">访问令牌</span>
+          <input id="wsToken" type="password" style="flex:1;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;padding:4px 6px;font-size:12px" placeholder="可选, 与 ARK_TOKEN 相同">
+        </div>
+        <button class="btn primary" id="saveConfigBtn" style="margin-bottom:6px">保存并重连</button>
+        <div id="configHint" style="color:#8b949e;font-size:11px;line-height:1.5">默认连接 ws://127.0.0.1:9334。若 server 设置了 ARK_TOKEN 或 ARK_WS_TOKEN, 请把同一令牌填到上面, 否则插件连接会被拒绝。</div>
+      </div>
+
       <div class="section-title">调试器 (CDP)</div>
       <div class="card" style="font-size:12px;line-height:1.6">
         <div id="cdpDetail">未启用。启用后可获得: 真实鼠标/键盘事件、整页截图、真实设备与媒体模拟、网络响应体、异步 JS 执行。</div>

@@ -16,6 +16,8 @@ const fs = require('fs');
 const path = require('path');
 
 const AGENT = new http.Agent({ keepAlive: true });
+const { resolveConnection } = require('../client/browser-client');
+const CONN = resolveConnection();
 const reportPath = process.argv.includes('--report')
   ? process.argv[process.argv.indexOf('--report') + 1]
   : path.join(__dirname, '..', 'reports', 'real-scenario-v3.md');
@@ -23,8 +25,8 @@ const reportPath = process.argv.includes('--report')
 function req(method, p, body, timeout = 30000) {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
-    const r = http.request({ hostname: 'localhost', port: 9333, path: p, method, agent: AGENT,
-      headers: body ? { 'Content-Type': 'application/json' } : {}, timeout }, res => {
+    const r = http.request({ hostname: CONN.host, port: CONN.port, path: p, method, agent: AGENT,
+      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(CONN.token ? { 'X-Ark-Token': CONN.token } : {}) }, timeout }, res => {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {
@@ -217,9 +219,14 @@ async function main() {
     ['等待结果页 URL', async () => { const r = await POST('/wait-for-url', { pattern: 'search', timeout: 30000 }); return r.data.success === true ? true : `url: ${JSON.stringify(r.data)}`; }],
     ['等待结果出现', async () => (await POST('/wait-for', { selector: '#b_results > li', timeout: 20000 })).data.success === true],
     ['提取首条标题', async () => {
-      // 第一条 li 可能是 b_ans/b_top 答案卡片(无 h2, 夸克 UA 下常见), 取标准结果卡 .b_algo h2
-      const r = await POST('/text', { selector: '#b_results .b_algo h2' });
-      return typeof r.data === 'string' && r.data.length > 5 ? true : `text: ${JSON.stringify(r.data)}`;
+      // 第一条 li 可能是 b_ans/b_top 答案卡片(无 h2, 夸克 UA 下常见), 取标准结果卡 .b_algo h2;
+      // 必应结果卡渲染有先后(答案卡先出, 标准卡后出), 单次查询会偶发落空 → 轮询等待
+      for (let i = 0; i < 16; i++) {
+        const r = await POST('/text', { selector: '#b_results .b_algo h2' });
+        if (typeof r.data === 'string' && r.data.length > 5) return true;
+        await sleep(500);
+      }
+      return 'text: null(8s 内未出现标准结果卡 .b_algo h2)';
     }],
     ['结果条数统计', async () => { const r = await POST('/query-all', { selector: '#b_results > li', limit: 20 }); return Array.isArray(r.data) && r.data.length >= 1; }],
     ['整页截图', async () => { const r = await GET('/screenshot/full', 30000); return r.data.success === true && r.data.dataUrl.startsWith('data:image') ? true : `shot: ${JSON.stringify(r.data).slice(0, 200)}`; }],

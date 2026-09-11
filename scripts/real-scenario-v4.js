@@ -17,6 +17,8 @@ const fs = require('fs');
 const path = require('path');
 
 const AGENT = new http.Agent({ keepAlive: true });
+const { resolveConnection } = require('../client/browser-client');
+const CONN = resolveConnection();
 const reportPath = process.argv.includes('--report')
   ? process.argv[process.argv.indexOf('--report') + 1]
   : path.join(__dirname, '..', 'reports', 'real-scenario-v4.md');
@@ -24,8 +26,8 @@ const reportPath = process.argv.includes('--report')
 function req(method, p, body, timeout = 30000) {
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
-    const r = http.request({ hostname: 'localhost', port: 9333, path: p, method, agent: AGENT,
-      headers: body ? { 'Content-Type': 'application/json' } : {}, timeout }, res => {
+    const r = http.request({ hostname: CONN.host, port: CONN.port, path: p, method, agent: AGENT,
+      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(CONN.token ? { 'X-Ark-Token': CONN.token } : {}) }, timeout }, res => {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => {
@@ -265,7 +267,15 @@ async function main() {
     ['页面标题非空', async () => poll(async () => { const t = await evR('document.title', 8000); return typeof t === 'string' && t.length > 5; }, 20000, 800)],
     ['链接列表可读', async () => { const r = await POST('/query-all', { selector: 'a', limit: 12, fields: ['text'] }, 15000); return Array.isArray(r.data) && r.data.filter(x => x && typeof x.text === 'string' && x.text.trim().length > 0).length >= 3 ? true : `links: ${JSON.stringify(r.data).slice(0, 200)}`; }],
     ['滚动浏览', async () => (await POST('/scroll-by', { y: 800 }, 15000)).data.success === true],
-    ['滚动位置变化', async () => { const y = await evR('window.scrollY', 8000); return typeof y === 'number' && y > 0; }],
+    ['滚动位置变化', async () => {
+      const y = await evR('window.scrollY', 8000);
+      if (typeof y === 'number' && y > 0) return true;
+      // 内容不足一屏时无可滚动空间(如 IANA 首页在 2560x1210 大视口下仅 ~900px 高),
+      // 此时 scroll-by 是无操作成功, 不存在"位置变化", 判定通过
+      const m = await evR('({ docH: document.documentElement.scrollHeight, ih: innerHeight })', 8000);
+      const noScrollSpace = m && typeof m.docH === 'number' && m.docH <= m.ih + 50;
+      return noScrollSpace ? true : `scrollY=${y}, docH=${m?.docH}, ih=${m?.ih}`;
+    }],
     ['页面信息完整', async () => { const r = await GET('/page-info', 15000); return r.data.title && r.data.title.length > 0 && r.data.url.includes('iana.org') ? true : `info: ${JSON.stringify(r.data).slice(0, 150)}`; }],
     ['标题层级提取', async () => { const r = await POST('/query-all', { selector: 'h2, h3', limit: 8 }, 15000); return Array.isArray(r.data) && r.data.length >= 1; }],
   ]);

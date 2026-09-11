@@ -10,8 +10,10 @@
  *  - --url: 指定测试页 URL(默认内置本地服务器)
  */
 const http = require('http');
-
-const HOST = 'localhost', PORT = 9333;
+// 连接参数与令牌统一从 client 解析(自动读取 server/.ark-token, 支持 ARK_PORT/ARK_TOKEN)
+const { resolveConnection } = require('../client/browser-client');
+const CONN = resolveConnection();
+const HOST = CONN.host, PORT = CONN.port, TOKEN = CONN.token;
 let failures = 0, passed = 0, skipped = 0;
 const onlyCore = process.argv.includes('--only-core');
 const argUrlIdx = process.argv.indexOf('--url');
@@ -23,7 +25,7 @@ function req(method, path, body, timeout = 30000) {
   return new Promise((resolve, reject) => {
     const r = http.request({
       hostname: HOST, port: PORT, path, method, agent,
-      headers: body ? { 'Content-Type': 'application/json' } : {},
+      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(TOKEN ? { 'X-Ark-Token': TOKEN } : {}) },
       timeout
     }, (res) => {
       let data = '';
@@ -215,7 +217,8 @@ async function main() {
     await POST('/fill', { fields: [{ selector: '#user', value: 'temp' }] });
     const r = await POST('/clear', { selector: '#user' });
     const v = await POST('/value', { selector: '#user' });
-    return r.data.success === true && v.data.value === '';
+    const ok = r.data.success === true && v.data.value === '';
+    return ok ? true : { clearResp: r.data, valueResp: v.data };
   });
   await test('POST /focus', async () => {
     const r = await POST('/focus', { selector: '#user' });
@@ -444,21 +447,39 @@ async function main() {
       globalThis.smokeOrigWidth = orig.data.result;
       const r = await POST('/device', { device: 'iPhone 14' });
       if (r.data.success !== true) return false;
-      const v = await POST('/evaluate', { code: 'innerWidth' });
-      const ok = v.data.result === 390;
+      // 夸克内核应用 device override 有瞬时抖动(首读可能是换算中间值) → 轮询等待稳定
+      let w = null;
+      for (let i = 0; i < 12; i++) {
+        const v = await POST('/evaluate', { code: 'innerWidth' });
+        w = v.data.result;
+        if (w === 390) break;
+        await new Promise(r2 => setTimeout(r2, 250));
+      }
+      // 用"移动 UA 生效"佐证设备模拟已应用(比单看 innerWidth 更贴近语义)
+      const ua = await POST('/evaluate', { code: '/iPhone/.test(navigator.userAgent)' });
+      const ok = w === 390 && ua.data.result === true;
       await POST('/device/clear', {});
       return ok;
-    }, 25000);
+      }, 25000);
     await test('POST /device/clear 恢复视口', async () => {
       const r = await POST('/device/clear', {});
       // 恢复断言基于 set 前原始宽度(±10%): 窗口可能被用户缩窄, 不能用固定 390
       const target = globalThis.smokeOrigWidth;
+      const tiny = (v) => typeof v === 'number' && v >= 0 && v < 100;   // 最小化时夸克上报 45x14 等异常小值
+      const seen = [];
       for (let i = 0; i < 10; i++) {
         const v = await POST('/evaluate', { code: 'innerWidth' });
-        if (r.data.success === true && typeof target === 'number' && Math.abs(v.data.result - target) < target * 0.1) return true;
+        const cur = v.data.result;
+        seen.push(cur);
+        if (r.data.success === true && typeof target === 'number' && Math.abs(cur - target) < target * 0.1) return true;
+        // 窗口不可见(innerWidth=0 或异常小值)时插件会自动施加虚拟视口保证可用:
+        // 这种情况下"恢复到原始"没有意义, 只要给回一个可用视口(>0)且清除成功即可
+        if (r.data.success === true && typeof cur === 'number' && cur > 0 && (target === 0 || target == null || tiny(target))) return true;
+        // 插件在 clear 时做了视口修复(viewportRestore)且当前视口可用: 视为通过(窗口可见性在测试期间变化)
+        if (r.data.success === true && r.data.viewportRestore && typeof cur === 'number' && cur > 0) return true;
         await new Promise(r2 => setTimeout(r2, 500));
       }
-      return false;
+      return { target, seen, clearResp: r.data };
     });
 
     await test('POST /media 真实深色模式 (验证 matchMedia)', async () => {

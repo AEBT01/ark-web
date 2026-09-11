@@ -24,7 +24,20 @@ const fs = require('fs');
 
 class ArkFast {
   constructor(opts = {}) {
-    this.client = opts.client || new BrowserClient({ baseUrl: opts.baseUrl, session: opts.session });
+    if (opts.client) {
+      this.client = opts.client;
+    } else {
+      // 兼容 baseUrl: 'http://127.0.0.1:9333'(旧写法曾因 BrowserClient 只认 host/port 而失效)
+      let host = opts.host, port = opts.port;
+      if (opts.baseUrl) {
+        try {
+          const u = new URL(opts.baseUrl);
+          host = host || u.hostname;
+          port = port || u.port || undefined;
+        } catch { /* 忽略非法 baseUrl, 回落默认值 */ }
+      }
+      this.client = new BrowserClient({ host, port, token: opts.token, session: opts.session });
+    }
     if (opts.session) this.client.session = opts.session;
   }
 
@@ -56,6 +69,15 @@ class ArkFast {
     } catch {}
     return this.client.request('/click', { method: 'POST', body: { selector, fast: true } });
   }
+
+  // —— 视觉 ref 操作(推荐: 无需坐标, 滚动/位移后依然准确) —— //
+  async clickRef(ref, opts = {}) { return this.client.clickRef(ref, { fast: true, ...opts }); }
+  async hoverRef(ref, opts = {}) { return this.client.hoverRef(ref, opts); }
+  async fillRef(ref, value, opts = {}) { return this.client.fillRef(ref, value, opts); }
+  /** 读取元素完整文本/值(小字读不清时优于放大截图) */
+  async readText(ref) { return this.client.readText(ref); }
+  /** 裁剪放大截图: scale 默认 2, format 建议 webp(最省 token) */
+  async zoom(opts = {}) { return this.client.zoom({ scale: 2, format: 'webp', ...opts }); }
 
   async clickText(text, opts = {}) {
     // 一键文本点击：服务端 /act 一次 HTTP 完成 snapshot→mouse→evaluate 兜底
@@ -133,6 +155,11 @@ class ArkFast {
     const map = {
       snapshot: () => this.snapshot(data),
       click: () => this.click(data.selector, data),
+      clickRef: () => this.clickRef(data.ref, data),
+      hoverRef: () => this.hoverRef(data.ref, data),
+      fillRef: () => this.fillRef(data.ref, data.value, data),
+      readText: () => this.readText(data.ref),
+      zoom: () => this.zoom(data),
       clickText: () => this.clickText(data.text, data),
       fill: () => this.fill(data.fields, data),
       type: () => this.type(data.selector, data.text, data),
@@ -174,7 +201,7 @@ if (require.main === module) {
         if (args.includes('--fast')) opts.fast = true;
         if (args.includes('--binary')) r = await fast.snapshotBinary(opts);
         else r = await fast.snapshot(opts);
-        const file = args.find(a => a.endsWith('.png') || a.endsWith('.jpg'));
+        const file = args.find(a => /\.(png|webp|jpe?g)$/i.test(a));
         if (file && r.dataUrl) {
           const b64 = r.dataUrl.split(',')[1];
           fs.writeFileSync(file, Buffer.from(b64, 'base64'));
@@ -190,9 +217,28 @@ if (require.main === module) {
       }
       case 'click': r = await fast.click(args[1], { fast: args.includes('--fast') }); console.log(JSON.stringify(r, null, 2)); break;
       case 'clickText': r = await fast.clickText(args[1], { fast: args.includes('--fast') }); console.log(JSON.stringify(r, null, 2)); break;
+      case 'clickRef': r = await fast.clickRef(+args[1]); console.log(JSON.stringify(r, null, 2)); break;
+      case 'hoverRef': r = await fast.hoverRef(+args[1]); console.log(JSON.stringify(r, null, 2)); break;
+      case 'fillRef': r = await fast.fillRef(+args[1], args.slice(2).join(' ')); console.log(JSON.stringify(r, null, 2)); break;
+      case 'readText': r = await fast.readText(+args[1]); console.log(JSON.stringify(r, null, 2)); break;
+      case 'zoom': {
+        const opts = {};
+        const file = args.find(a => /\.(png|webp|jpe?g)$/i.test(a)) || 'zoom.webp';
+        for (const a of args) {
+          if (a.startsWith('--scale=')) opts.scale = +a.slice(8);
+          else if (a.startsWith('--format=')) opts.format = a.slice(9);
+          else if (/^\d+$/.test(a)) opts.ref = +a;
+        }
+        r = await fast.zoom(opts);
+        if (r?.dataUrl) {
+          fs.writeFileSync(file, Buffer.from(r.dataUrl.split(',')[1], 'base64'));
+          console.log(JSON.stringify({ success: true, file, scale: r.scale, clip: r.clip, text: r.text }, null, 2));
+        } else console.log(JSON.stringify(r, null, 2));
+        break;
+      }
       case 'fill': r = await fast.fill(JSON.parse(args[1])); console.log(JSON.stringify(r, null, 2)); break;
       case 'extract': r = await fast.extract(JSON.parse(args[1])); console.log(JSON.stringify(r, null, 2)); break;
-      default: console.log('usage: node ark-fast.js <snapshot|click|clickText|fill|extract> [...] [--fast] [--annotate] [--binary]');
+      default: console.log('usage: node ark-fast.js <snapshot|click|clickRef|fillRef|readText|zoom|clickText|fill|extract> [...] [--fast] [--annotate] [--binary] [--scale=3] [--format=webp]');
     }
   })();
 }
