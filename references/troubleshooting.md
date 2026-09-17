@@ -33,7 +33,7 @@
 
 ```powershell
 node client\browser-client.js status          # 看 connections[]: suspect:true 或 timeouts>0 即可疑
-node client\browser-client.js ping            # 最轻量的连通性探针
+node client\browser-client.js chain "ping"    # 最轻量的连通性探针（注意: ping 是链式步骤, 没有同名顶层命令）
 # 仍不行 → 重启 server（最彻底）
 Get-NetTCPConnection -LocalPort 9333 -State Listen | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }
 node server\bridge-server.js
