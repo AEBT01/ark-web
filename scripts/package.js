@@ -24,7 +24,7 @@ const ROOT = path.join(__dirname, '..');
 const DIST = path.join(ROOT, 'dist');
 
 /** 整包纳入的目录（相对 ROOT） */
-const INCLUDE_DIRS = ['extension', 'panel', 'server', 'client', 'skills', 'scripts', 'references', 'docs', 'config', 'verify'];
+const INCLUDE_DIRS = ['extension', 'server', 'client', 'skills', 'scripts', 'references', 'docs'];
 
 /** 顶层单文件 */
 const INCLUDE_FILES = ['ark.js', 'start.bat', 'start.sh', 'README.md', 'README.en.md', 'CHANGELOG.md', 'SKILL.md', 'LICENSE', 'VERSION'];
@@ -43,7 +43,6 @@ const EXCLUDE_RES = [
   /^data\//,
   /^reports\//,
   /^chrome-profile\//,
-  /^verify\/evidence\//,
   /^scripts\/l10n-backup\//,
   /^scripts\/agent-traces\//,
   /^scripts\/diagnostics\//,
@@ -65,8 +64,6 @@ const VENDOR = ['server/node_modules/ws'];
 /** 自检：这些路径必须出现在产物里（少一个就说明打包又退化了） */
 const MUST_HAVE = [
   'extension/manifest.json',
-  'panel/manifest.json',
-  'panel/panel.js',
   'server/bridge-server.js',
   'server/agent/loop.js',
   'server/agent/compaction.js',
@@ -74,8 +71,6 @@ const MUST_HAVE = [
   'server/capabilities/index.js',
   'server/core/router.js',
   'skills/browser-ops/SKILL.md',
-  'verify/agent-units.js',
-  'scripts/sync-panel.js',
   'client/browser-client.js',
   'VERSION'
 ];

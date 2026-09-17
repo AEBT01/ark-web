@@ -4,10 +4,10 @@
  *
  * 用法:
  *   node scripts/bump-version.js                 # 只看当前一致性
- *   node scripts/bump-version.js 3.0.0           # 写入 VERSION 并同步三处清单
+ *   node scripts/bump-version.js 3.0.0           # 写入 VERSION 并同步各处清单
  *   node scripts/bump-version.js 3.0.1 --dry-run # 预演，不写文件
  *
- * 三处目标（桥接扩展清单 / 面板清单 / 服务端 package.json）必须一致，
+ * 各处目标（桥接扩展清单 / 服务端 package.json）必须一致，
  * 否则 package.js 会拒绝打包 —— 这是为了防止分发包版本与实际内容再对不上。
  */
 
@@ -38,8 +38,8 @@ for (const t of c.targets) {
 }
 console.log('');
 if (c.ok) {
-  console.log('三处一致。下一步: node scripts/package.js');
+  console.log('各处一致。下一步: node scripts/package.js');
 } else {
-  console.log('不一致。执行 node scripts/bump-version.js ' + c.version + ' 统一三处清单。');
+  console.log('不一致。执行 node scripts/bump-version.js ' + c.version + ' 统一各处清单。');
   process.exitCode = 1;
 }

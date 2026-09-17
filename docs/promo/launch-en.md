@@ -1,6 +1,6 @@
-# ark-web v2.9.0 — Launch Pack (EN)
+# ark-web v3.0.2 — Launch Pack (EN)
 
-> Repo: https://github.com/AEBT01/ark-web · Docs site: https://aebt01.github.io/ark-web/ · License: MIT · Version: v2.9.0 (English README + Pages site; core unchanged — details per repo)
+> Repo: https://github.com/AEBT01/ark-web · Docs site: https://aebt01.github.io/ark-web/ · License: MIT · Version: v3.0.2 (English README + Pages site; core unchanged — details per repo)
 
 ---
 
@@ -33,7 +33,7 @@ Plus: 30+ dimension audit engine (perf/a11y/SEO/security, scored HTML reports), 
 
 **Why:** Logged-in sites, SSO, and paywalls "just work" because it's your real browser and real rendering. For multimodal models there's one atomic vision call: `snapshot` returns a screenshot plus SoM coordinate anchors, so the model clicks by coordinates. `?session=` gives server-enforced session isolation so multiple agents can share one Chrome. A 30+ dimension audit engine scores perf/a11y/SEO/security and emits an HTML report.
 
-**Demo:** Load `extension/` in `chrome://extensions` → click "Enable Debug" → `node bridge-server.js` → `curl http://localhost:9333/status`, then `GET /snapshot?annotate=1`. Full tour: https://aebt01.github.io/ark-web/ — v2.9.0 adds the English README + Pages site (core unchanged).
+**Demo:** Load `extension/` in `chrome://extensions` → click "Enable Debug" → `node bridge-server.js` → `curl http://localhost:9333/status`, then `GET /snapshot?annotate=1`. Full tour: https://aebt01.github.io/ark-web/ — v3.0.2 adds the English README + Pages site (core unchanged).
 
 **Ask:** I'd love feedback on (a) the snapshot/SoM vision workflow vs. selector-based approaches, (b) whether `?session` isolation matches how you run parallel agents, and (c) what audit dimensions you'd add. MIT licensed; issues and PRs welcome.
 
@@ -47,7 +47,7 @@ Plus: 30+ dimension audit engine (perf/a11y/SEO/security, scored HTML reports), 
 
 **Body:**
 
-I run my agents locally and got tired of every framework spawning a fresh Chromium with no logins. So I published **ark-web** (MIT, v2.9.0): a Chrome MV3 extension + local Node bridge that lets an LLM drive the browser you actually use.
+I run my agents locally and got tired of every framework spawning a fresh Chromium with no logins. So I published **ark-web** (MIT, v3.0.2): a Chrome MV3 extension + local Node bridge that lets an LLM drive the browser you actually use.
 
 How it works (per repo):
 
@@ -68,7 +68,7 @@ Happy to answer questions — especially from anyone wiring this to ollama / lla
 
 ## 3b. Reddit — r/selfhosted
 
-**Title:** ark-web v2.9.0 (MIT): self-hosted bridge that lets AI use your real Chrome — 117 endpoints, audits, session isolation
+**Title:** ark-web v3.0.2 (MIT): self-hosted bridge that lets AI use your real Chrome — 154 endpoints, audits, session isolation
 
 **Body:**
 
@@ -81,7 +81,7 @@ Happy to answer questions — especially from anyone wiring this to ollama / lla
 - Atomic `snapshot`: screenshot + SoM coordinate anchors for vision-model automation
 - Audit engine for before/after perf reports on your own sites
 
-**Install (per repo):** load `extension/` via `chrome://extensions` → Enable Debug → `node bridge-server.js` (or start script) → `curl localhost:9333/status`. v2.9.0 = English README + Pages site (https://aebt01.github.io/ark-web/); core unchanged.
+**Install (per repo):** load `extension/` via `chrome://extensions` → Enable Debug → `node bridge-server.js` (or start script) → `curl localhost:9333/status`. v3.0.2 = English README + Pages site (https://aebt01.github.io/ark-web/); core unchanged.
 
 ⚠️ **HEADS-UP — local-only, NO auth:** this is a localhost debug tool with no authentication. Any local process can fully drive your browser. Bind to loopback, firewall the ports, never expose to LAN/internet. If you need remote access, put your own auth/reverse-proxy in front — otherwise treat as "per repo" and keep it on the box.
 
@@ -91,14 +91,14 @@ Happy to answer questions — especially from anyone wiring this to ollama / lla
 
 **Cover title:** Let AI Drive Your Real Chrome: 117 Endpoints, Snapshot Vision, and Audit Reports — All Local
 
-**Lede:** Headless browsers forget who you are. ark-web (MIT, v2.9.0) puts your AI behind the wheel of the Chrome you actually use — CDP-powered real input, one-call screenshot+coordinate snapshots, multi-agent session isolation, batch chaining, device/network emulation, and a 30+ dimension audit engine. Localhost only, by design. Here's how it works and how to try it in 3 steps.
+**Lede:** Headless browsers forget who you are. ark-web (MIT, v3.0.2) puts your AI behind the wheel of the Chrome you actually use — CDP-powered real input, one-call screenshot+coordinate snapshots, multi-agent session isolation, batch chaining, device/network emulation, and a 30+ dimension audit engine. Localhost only, by design. Here's how it works and how to try it in 3 steps.
 
 ---
 
 ## Alt titles (pick any)
 
-1. Let AI Drive the Browser You Actually Use: ark-web v2.9.0
+1. Let AI Drive the Browser You Actually Use: ark-web v3.0.2
 2. Your Chrome, Your Logins, Your AI: 117 Local Endpoints
 3. Stop Giving Your Agent a Fresh Chromium — Give It Your Chrome
 4. Snapshot Vision + Session Isolation + Audits: a Local Browser Bridge for AI
-5. ark-web v2.9.0: Real-Browser Automation for AI Agents (MIT, Local-Only)
+5. ark-web v3.0.2: Real-Browser Automation for AI Agents (MIT, Local-Only)

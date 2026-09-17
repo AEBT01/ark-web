@@ -1,6 +1,6 @@
-# ark-web — FAQ 回复弹药库（v2.9.0）
+# ark-web — FAQ 回复弹药库（v3.0.2）
 
-> 原则：只写括号内确认过的特性（MV3 插件 CDP + 本地 Node 桥 localhost:9333、117 端点、snapshot+SoM、?session 隔离、30+ 维审计、batch 链式、device/media/network 模拟、MIT、v2.9.0 英文 README+Pages 站 https://aebt01.github.io/ark-web/ ），不确定的写"以仓库为准"。每条可直接复制回复。
+> 原则：只写括号内确认过的特性（MV3 插件 CDP + 本地 Node 桥 localhost:9333、117 端点、snapshot+SoM、?session 隔离、30+ 维审计、batch 链式、device/media/network 模拟、MIT、v3.0.2 英文 README+Pages 站 https://aebt01.github.io/ark-web/ ），不确定的写"以仓库为准"。每条可直接复制回复。
 
 ---
 

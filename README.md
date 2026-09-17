@@ -1,21 +1,25 @@
 # Ark Web
 
-> **两件东西装在一个仓库里，别混为一谈：**
+> **本仓只做一件事：浏览器扩展 + Bridge Server，让 AI 操控你正在用的真实浏览器。**
+>
+> 仓库内部有两个面，分界是**机制**而不是约定：
 >
 > | | 是什么 | 入口 |
 > |---|---|---|
 > | **技能接口** | agent 用它操控浏览器的能力面（`/tabs`、`/semantic/*`、`/evaluate`、工具清单…），语义与契约见 `SKILL.md` | `extension/` + `server/capabilities/*`（非 internal 的那些） |
-> | **产品面** | 本机配置与界面：侧边栏面板、密钥/预算/敏感名单设置、开机自启、打包发布 | `panel/` + `server/capabilities/settings.js`（标了 `internal: true`，agent 触不到） |
+> | **本机配置面** | 密钥 / 预算 / 敏感名单 / 令牌轮换 / 开机自启 / 打包发布 | `server/capabilities/settings.js`（标了 `internal: true`） |
 >
-> 产品面的分界是**机制**而不是约定：`server/core/internal-routes.js` 收集标了 `internal` 的能力域，
+> 配置面的隔断由 `server/core/internal-routes.js` 落实：它收集标了 `internal` 的能力域，
 > 通用直通工具（`ark_api`）对这些端点直接拒绝，`/capabilities` 也带标记输出。
-> 使用者请看 `docs/产品使用说明书.md`（或打开 `docs/index.html`）。
 
-> [English](README.en.md) | 中文（本页） | [Live demo](docs/index.html)
+> 另有一个同名但**完全独立**的项目「Ark BrowserOS」（深改浏览器 + opencode 侧边栏），
+> 与本仓同源但已分家、无代码依赖。见 `C:\Users\画扇\ark-browseros`。
+
+> [English](README.en.md) | 中文（本页）
 >
 > Control your **real** Chrome from AI — 154 endpoints, snapshot/SoM vision, session isolation, audit engine.
 
-[![version](https://img.shields.io/badge/version-v3.0.1-blue)](https://github.com/AEBT01/ark-web)
+[![version](https://img.shields.io/badge/version-v3.0.2-blue)](https://github.com/AEBT01/ark-web)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![stars](https://img.shields.io/github/stars/AEBT01/ark-web?style=social)](https://github.com/AEBT01/ark-web)
 [![last-commit](https://img.shields.io/github/last-commit/AEBT01/ark-web)](https://github.com/AEBT01/ark-web/commits)

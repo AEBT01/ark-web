@@ -183,12 +183,10 @@ module.exports = {
         srv.authToken = next;
         srv.wsExpectedToken = next;
       }
-      const sync = require('child_process').spawnSync(process.execPath, [path.join(__dirname, '..', '..', 'scripts', 'sync-panel.js'), '--yes'], { cwd: path.join(__dirname, '..', '..'), encoding: 'utf8' });
       return {
         ok: true,
         token: next,
         tokenFile: TOKEN_FILE,
-        panelSync: sync.status === 0 ? '面板副本已同步新令牌' : '面板同步失败：' + String(sync.stderr || '').slice(0, 200),
         note: 'CLI 会自动读取令牌文件；其他已保存令牌的调用方需要更新。此令牌只在此处返回一次。'
       };
     },

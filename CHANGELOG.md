@@ -1,7 +1,43 @@
 # Changelog — Ark Web
 
 版本号以仓库根目录的 `VERSION` 为唯一来源，由 `node scripts/bump-version.js <版本>` 同步到
-扩展清单、面板清单与服务端 package.json（三处不一致时打包会拒绝执行）。
+扩展清单与服务端 package.json（两处不一致时打包会拒绝执行）。
+
+## 未发布 — 项目归属清理（2026-09-17）
+
+> 背景：本仓与另一个独立项目「Ark BrowserOS」（深改浏览器 + opencode 侧边栏）曾共用
+> 代码与名字，导致一批属于后者的产物混进本仓并接进了运行时逻辑。本次把归属理清。
+
+**移除（属于 Ark BrowserOS，不属于本项目）**
+
+- `scripts/sync-panel.js` —— 侧边栏面板同步，判断条件是对方扩展名「Ark 助手」；
+  本项目没有 `panel/`，该调用在 `/settings/token/rotate` 里一直静默失败。
+- `scripts/launch-browseros.cmd`、`launch-browseros-detached.js` —— 启动对方的浏览器
+  并同时加载其面板；其中固化的路径（`browser-debug-extension-bos`）已不存在。
+- `scripts/focus-browseros.ps1`、`minimize-browseros.ps1` —— 对方浏览器的窗口管理。
+- `scripts/l10n-browseros.js`、`l10n-apply.js`、`l10n-enumcheck.js`、`l10n-inventory.js`
+  及配套 `l10n-*.json` —— 对方界面的汉化工具链。
+
+**修正**
+
+- `scripts/lib/version.js`：去掉 `panel/manifest.json` 版本目标（本项目无 panel）；
+  权威版本文件 `VERSION` 补回，值 3.0.2。
+- `server/capabilities/settings.js`：令牌轮换不再调用 sync-panel；
+  返回值里的 `panelSync` 字段随之移除。
+- `server/tool-registry.js`、`scripts/verify-all.js`：删掉指向"侧边栏设置"的提示。
+- `scripts/package.js`：`INCLUDE_DIRS` 去掉不存在的 `panel`/`config`/`verify`；
+  `MUST_HAVE` 去掉 `panel/*`、`verify/agent-units.js`、`scripts/sync-panel.js`。
+- `scripts/verify-all.js`：移除 `panel-console` 套件（对方的面板端到端测试）。
+- 清理开发痕迹：16 个 `.sync-backup-*`、`dist/`、`reports/`、`data/`、
+  `scripts/diagnostics/`（59 个临时调试脚本）、`scripts/_legacy-bridge-server.js`、
+  `scripts/refactor-splice.js`、`scripts/refactor-split.js`。
+
+**已知缺口**
+
+- `verify/` 目录（`agent-units` 62 项、`route-parity`、`http-smoke`、`ws-guard`、
+  `cdp-smoke` 13 项、`runner`、`sse-tasks`）在本机、远端与备份中均不存在，
+  从未提交过。`verify-all.js` 已移除对 `panel-console` 的调用，其余套件路径保留原样，
+  待补齐后即可恢复。
 
 ## v3.0.2 (2026-09-14) — 独立审查后的修复批次：安全闸门、上下文与验证可信度
 

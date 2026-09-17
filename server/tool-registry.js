@@ -1136,7 +1136,7 @@ function define(t) {
         return {
           error: 'internal-endpoint',
           message: '这是本机配置端点（' + path + '），属于产品设置面，不在 agent 的浏览器能力范围内。',
-          hint: '需要改配置请让用户到侧边栏「设置」里操作，或由用户运行 CLI（如 node scripts/sync-panel.js --yes）。'
+          hint: '需要改配置请由用户在本机直接操作，例如运行 CLI 或编辑 ~/.ark-web/ 下的配置文件。'
         };
       }
       if (a.query) path += (path.indexOf('?') >= 0 ? '&' : '?') + String(a.query);

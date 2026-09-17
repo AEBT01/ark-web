@@ -2,12 +2,14 @@
 /**
  * 版本号的单一来源
  *
- * 产品里有三处必须一致的版本号：桥接扩展清单、侧边栏面板清单、服务端 package.json。
- * 历史教训：三者曾各自漂到 2.9.3 / 0.1.0 / 2.9.4，而 2.9.4 只是为了让命令优先路由到
+ * 产品里有两处必须一致的版本号：桥接扩展清单、服务端 package.json。
+ * 历史教训：版本号曾各自漂到 2.9.3 / 0.1.0 / 2.9.4，而 2.9.4 只是为了让命令优先路由到
  * BrowserOS 的人为抬升 —— 用版本号当路由信号是错的，路由改由 ARK_PREFER_BROWSER
  * 与连接标签决定（见 bridge-server.js 的 sendToPlugin）。版本号从此只表示"发布内容"。
  *
- * 权威文件是仓库根的 VERSION；其余三处由 stamp() 写入。
+ * 权威文件是仓库根的 VERSION；其余各处在 stamp() 时写入。
+ * 注：曾有一处 "侧边栏面板清单"（panel/manifest.json）目标，那是另一个项目
+ * （BrowserOS 深改版）的产物，本项目没有 panel/，故已移除。
  */
 
 const fs = require('fs');
@@ -18,7 +20,6 @@ const VERSION_FILE = path.join(ROOT, 'VERSION');
 
 const TARGETS = [
   { file: 'extension/manifest.json', label: '桥接扩展清单' },
-  { file: 'panel/manifest.json', label: '侧边栏面板清单' },
   { file: 'server/package.json', label: '服务端 package.json' }
 ];
 
@@ -35,7 +36,7 @@ function read() {
   } catch (e) { return '0.0.0'; }
 }
 
-/** 读三处目标当前的版本号（文件的第一个 "version" 字段） */
+/** 读各处目标当前的版本号（文件的第一个 "version" 字段） */
 function readTargets() {
   return TARGETS.map((t) => {
     const abs = path.join(ROOT, t.file);
@@ -58,7 +59,7 @@ function check() {
 }
 
 /**
- * 把 version 写进三处目标。
+ * 把 version 写进各处目标。
  * 用定点替换而非 JSON 重排，避免把清单文件整体重新格式化。
  * 同时替换文件里出现的旧版本字面量（如描述里的 "Ark Web v2.9.3"）。
  */

@@ -150,20 +150,17 @@ async function main() {
   }
 
   if (!pluginUp) {
-    skip('cdp-smoke / panel-console / runner / sse-tasks', '没有浏览器插件连接',
-      'node scripts/launch-browseros-detached.js --kill-first（脱离会话启动，同时加载桥接扩展与面板）');
+    skip('cdp-smoke / runner / sse-tasks', '没有浏览器插件连接',
+      '在浏览器里加载 extension/ 并点扩展图标「Enable Debug」');
   } else {
     if (!mockUp) {
-      skip('panel-console / runner', '夹具页服务未能启动（8899）', 'node scripts/mock-server.js');
+      skip('runner', '夹具页服务未能启动（8899）', 'node scripts/mock-server.js');
     }
     // 先把"目标页"准备好再跑需要它的套件 —— 包括 cdp-smoke：它现在没有 http 页面
     // 就会如实报失败（旧实现是 exit 0 静默跳过），而浏览器刚启动时通常只有内部页。
     if (mockUp) await ensureTarget('http://127.0.0.1:8899/test-page.html', /8899\/test-page/);
     runSuite('cdp-smoke（内核通道 13 项）', 'verify/cdp-smoke.js');
     if (mockUp) {
-      await ensureTarget('chrome-extension://' + (process.env.ARK_PANEL_ID || '') + '/panel.html',
-        /panel\.html/, process.env.ARK_PANEL_ID);
-      runSuite('panel-console（面板端到端 39 项）', 'verify/panel-console.js', { timeoutMs: 900000 });
       runSuite('runner（工作页交互）', 'verify/runner.js', { timeoutMs: 600000 });
     }
     runSuite('sse-tasks（事件流与取消）', 'verify/sse-tasks.js', { timeoutMs: 600000 });

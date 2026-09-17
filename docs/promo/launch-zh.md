@@ -1,18 +1,18 @@
-# ark-web v2.9.0 — 中文宣发包
+# ark-web v3.0.2 — 中文宣发包
 
-> 仓库：https://github.com/AEBT01/ark-web · 文档站：https://aebt01.github.io/ark-web/ · MIT 协议 · v2.9.0（新增英文 README + Pages 站，核心功能不变——不确定的以仓库为准）
+> 仓库：https://github.com/AEBT01/ark-web · 文档站：https://aebt01.github.io/ark-web/ · MIT 协议 · v3.0.2（新增英文 README + Pages 站，核心功能不变——不确定的以仓库为准）
 
 ---
 
 ## 1. 掘金
 
-**标题：** 让 AI 开你正在用的真浏览器：ark-web v2.9.0 开源（复用登录态 + 中文 Skill 手册 + 审计出报告）
+**标题：** 让 AI 开你正在用的真浏览器：ark-web v3.0.2 开源（复用登录态 + 中文 Skill 手册 + 审计出报告）
 
 **正文：**
 
 每次让 AI 操作网页，它都要新开一个没有登录态的 Chromium，又要扫码重登？**ark-web** 换了个思路：直接让 AI 开你正在用的真 Chrome。
 
-它是 Chrome MV3 插件（走 CDP）+ 本地 Node 桥（localhost:9333，117 个 HTTP 端点），MIT 开源，v2.9.0 刚发布英文 README 和文档站。
+它是 Chrome MV3 插件（走 CDP）+ 本地 Node 桥（localhost:9333，117 个 HTTP 端点），MIT 开源，v3.0.2 刚发布英文 README 和文档站。
 
 几个真实卖点（均以仓库为准）：
 
@@ -27,13 +27,13 @@
 
 ⚠️ **安全提醒**：localhost 本地调试工具，**无鉴权设计**，本机任何进程都能操控浏览器。仅限本机使用，不要暴露端口，不要在共享电脑上跑。
 
-v2.9.0 主要是英文 README + Pages 站（https://aebt01.github.io/ark-web/），核心不变。欢迎 Star 和提 Issue。
+v3.0.2 主要是英文 README + Pages 站（https://aebt01.github.io/ark-web/），核心不变。欢迎 Star 和提 Issue。
 
 ---
 
 ## 2. V2EX
 
-**标题：** [开源] ark-web v2.9.0：让 AI 开你的真 Chrome，复用登录态，本地桥 MIT 协议
+**标题：** [开源] ark-web v3.0.2：让 AI 开你的真 Chrome，复用登录态，本地桥 MIT 协议
 
 **正文：**
 
@@ -44,7 +44,7 @@ v2.9.0 主要是英文 README + Pages 站（https://aebt01.github.io/ark-web/）
 - **中文 Skill 手册**：`SKILL.md` + 中文 README，照着调就行
 - **审计出报告**：30+ 维度打分 + HTML 报告
 - 原子视觉 snapshot（截图 + SoM 坐标锚点）、`?session` 多会话隔离、batch 链式、device/media/network 模拟
-- MIT，v2.9.0：英文 README + https://aebt01.github.io/ark-web/
+- MIT，v3.0.2：英文 README + https://aebt01.github.io/ark-web/
 
 ⚠️ 仅本机用：localhost 无鉴权，不要暴露端口。
 
@@ -62,7 +62,7 @@ v2.9.0 主要是英文 README + Pages 站（https://aebt01.github.io/ark-web/）
 
 原理是 MV3 插件走 CDP + 本地桥 localhost:9333，对外 117 个 HTTP 接口。AI 照着中文 Skill 手册（`SKILL.md`）调接口就行：截图定位靠 snapshot（截图+坐标锚点），多任务靠 `?session` 隔离，批量操作走 batch 链式，还能模拟设备/网络，最爽的是审计功能——30 多个维度打分直接出 HTML 报告，改完再跑一遍对比，优化效果一目了然。
 
-v2.9.0 刚发了英文 README 和文档站：https://aebt01.github.io/ark-web/
+v3.0.2 刚发了英文 README 和文档站：https://aebt01.github.io/ark-web/
 
 泼盆冷水：它是 localhost 无鉴权设计，只能本机玩，千万别暴露端口。具体以仓库为准：https://github.com/AEBT01/ark-web
 
@@ -70,7 +70,7 @@ v2.9.0 刚发了英文 README 和文档站：https://aebt01.github.io/ark-web/
 
 ## 备选标题
 
-1. AI 开真浏览器是什么体验？ark-web v2.9.0：复用登录态、审计出报告
+1. AI 开真浏览器是什么体验？ark-web v3.0.2：复用登录态、审计出报告
 2. 不用重登！让 AI 直接用你的 Chrome：开源 ark-web 上新
 3. 给 AI 配个真浏览器：ark-web 中文手册 + 30 维审计报告
 4. 一个人测 perf 太累？让 AI 开你的浏览器自动审计出报告
