@@ -1,13 +1,13 @@
 # Ark Web
 
-> Control your **real** Chrome from AI: Chrome MV3 extension + Node Bridge — 117 endpoints, snapshot/SoM vision, session isolation, audit engine.
+> Control your **real** Chrome from AI: Chrome MV3 extension + Node Bridge — 154 endpoints, snapshot/SoM vision, session isolation, audit engine.
 
-[![version](https://img.shields.io/badge/version-v2.9.0-blue)](https://github.com/AEBT01/ark-web)
+[![version](https://img.shields.io/badge/version-v3.0.2-blue)](https://github.com/AEBT01/ark-web)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![stars](https://img.shields.io/github/stars/AEBT01/ark-web?style=social)](https://github.com/AEBT01/ark-web)
 [![last-commit](https://img.shields.io/github/last-commit/AEBT01/ark-web)](https://github.com/AEBT01/ark-web/commits)
 
-**Ark Web** is a local bridge that lets AI agents drive the browser you actually use — with your logins, cookies, and real fingerprint. No Puppeteer, no throwaway Chromium. An MV3 extension (CDP via `chrome.debugger`) talks over WebSocket (`:9334`) to a local Node bridge exposing **117 HTTP endpoints** (`:9333`): navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced **session isolation** for parallel agents, and a 30+ rule weighted **audit engine** (performance / a11y / SEO / security / resources).
+**Ark Web** is a local bridge that lets AI agents drive the browser you actually use — with your logins, cookies, and real fingerprint. No Puppeteer, no throwaway Chromium. An MV3 extension (CDP via `chrome.debugger`) talks over WebSocket (`:9334`) to a local Node bridge exposing **154 HTTP endpoints** (`:9333`): navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced **session isolation** for parallel agents, and a 30+ rule weighted **audit engine** (performance / a11y / SEO / security / resources).
 
 AI agents: load `SKILL.md` — the unified manual with a self-gating step (multimodal → vision workflow with snapshot + coordinates; text-only → selector workflow).
 
@@ -22,7 +22,7 @@ AI agents: load `SKILL.md` — the unified manual with a self-gating step (multi
 ## Features
 
 - **Snapshot / SoM vision** — `GET /snapshot` (JSON: `dataUrl` + anchors), `GET /snapshot/binary` (raw `image/png`, saves ~33% base64), `POST /act` (one-HTTP high-level intent: `snapshot`/`click`/`clickText`/`fill`/`type`/`extract`/`navigate`).
-- **117 endpoints** — navigation, click/hover/drag/scroll, type/fill/select/check, evaluate, wait-for (selector/text/url/load), screenshots (viewport/full/element), PDF, cookies/storage, console, DOM-changes, frames/layout, dialogs. Source of truth: `scripts/check-endpoints.js`.
+- **154 endpoints** — navigation, click/hover/drag/scroll, type/fill/select/check, evaluate, wait-for (selector/text/url/load), screenshots (viewport/full/element), PDF, cookies/storage, console, DOM-changes, frames/layout, dialogs. Source of truth: `scripts/check-endpoints.js`.
 - **Session isolation** — AsyncLocalStorage tab routing; `?session=` / `?tabId=` on every endpoint; per-tab queues (writes serial, reads parallel); audit-run captures and replays ALS context so queued audits never hijack your active tab.
 - **Audit engine** — `POST /audit`: 30+ dimensions (Web Vitals, long tasks, resource waterfall, images/fonts, framework detection, DOM complexity, security headers), 5 weighted category scores (0–100), deterministic root-cause insights + ROI-ranked opportunities; HTML single-file report + Markdown + compact AI format; JSONL history, before/after diff, async batch queue, performance budgets.
 - **Batch / chain** — `POST /batch` DAG (`_parallel` read blocks run `Promise.all`, 3–5× faster); CLI `chain "open …" "wait-load" "page-info" "screenshot shot.png"` in one HTTP+WS round trip; `POST /act` saves one RTT vs client-side snapshot→mouse.
@@ -92,7 +92,7 @@ curl -X POST http://localhost:9333/batch -d '{"steps":[
 
 |  | real browser? | protocol | MCP | visual (SoM) | session isolation | audit engine | best for |
 |---|---|---|---|---|---|---|---|
-| **ark-web** | ✅ your Chrome (CDP trusted input) | HTTP 117 + WS bridge | via bridge/CLI | ✅ atomic snapshot+anchors+binary | ✅ server-enforced per-tab/session | ✅ 30+ dims, scored, reports+trends | AI driving a lived-in browser + perf audits |
+| **ark-web** | ✅ your Chrome (CDP trusted input) | HTTP 154 + WS bridge | via bridge/CLI | ✅ atomic snapshot+anchors+binary | ✅ server-enforced per-tab/session | ✅ 30+ dims, scored, reports+trends | AI driving a lived-in browser + perf audits |
 | **browser-use** | ⚠️ drives own Chromium | Python lib | ❌ | ⚠️ screenshot + model grounding | ⚠️ manual contexts | ❌ | scripted agent loops in fresh profiles |
 | **playwright-mcp** | ⚠️ Playwright-managed browser | MCP over Playwright | ✅ | ⚠️ snapshot (a11y tree), no SoM coords | ⚠️ contexts | ❌ | MCP clients needing Playwright actions |
 | **chrome-devtools-mcp** | ✅ local Chrome via CDP | MCP | ✅ | ⚠️ screenshot, no anchor map | ❌ single target | ⚠️ perf traces only | DevTools power users inside MCP |
@@ -107,7 +107,7 @@ curl -X POST http://localhost:9333/batch -d '{"steps":[
 ark-web/
 ├── extension/            # Chrome MV3 plugin (manifest v2.8.2, background CDP + audit capture, content monitor, popup auth)
 ├── server/
-│   ├── bridge-server.js  # HTTP API (117) + WebSocket bridge + cache/keep-alive/per-tab queues
+│   ├── bridge-server.js  # HTTP API (154) + WebSocket bridge + cache/keep-alive/per-tab queues
 │   ├── audit.js          # audit engine: scoring/insights/opportunities/budgets
 │   └── audit-report.js   # report rendering + trend store + batch queue
 ├── client/
@@ -131,9 +131,20 @@ Local debug tool: binds **localhost**, **no authentication** by design. Any loca
 ## 中文简介（第二语言节）
 
 > AI 浏览器调试桥接 — Chrome 插件 + Bridge Server + HTTP API = 真实浏览器控制。
+> 支持 Chrome 及**夸克等 Chromium 内核套壳浏览器**（夸克实测可用，插件会如实上报真实内核）。
 
-把本仓库（或其子集）复制到 `%USERPROFILE%\.agents\skills\ark-web\`，AI 即可通过 `SKILL.md`（统一 v9：文本+视觉二合一，模型自检门）获得全部能力手册。快速开始：`chrome://extensions` 加载 `extension/` → 点插件图标「启用调试」→ `start.bat`（或 `./start.sh`，或 `cd server && npm install && node bridge-server.js`）→ `curl http://localhost:9333/status`。本地 localhost、无鉴权设计，请勿暴露端口或在不可信环境运行。完整中文文档见原 `README.md`，版本历史见 `CHANGELOG.md`。
+**两步用起来**：① `chrome://extensions` 加载 `extension/` → 点插件图标「启用调试」；
+② `start.bat`（或 `./start.sh`，或 `cd server && npm install && node bridge-server.js`）→
+`curl http://127.0.0.1:9333/health`。
+
+密钥与令牌：令牌自动生成在 `~/.ark-web/token`，除 `/health` 外所有端点需带 `X-Ark-Token`
+（用 `node client/browser-client.js` 会自动读取，永不 401）。服务默认**只绑定回环地址**，
+并叠加 Host / Origin 校验 —— 不要把它暴露到局域网或公网。
+
+Agent 用法：让它读本仓库的 `SKILL.md`（v3.0.2 起为视觉优先的单一手册）；若希望按技能名自动发现，
+可把本仓库（或其子集）复制到 agent 的技能目录（例如 `%USERPROFILE%\.agents\skills\ark-web\`）。
+完整中文文档见 `README.md`，版本历史见 `CHANGELOG.md`。
 
 ## License
 
-MIT — see [LICENSE](../LICENSE).
+MIT — see [LICENSE](LICENSE).

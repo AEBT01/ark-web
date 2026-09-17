@@ -1,12 +1,12 @@
 # ark-web — FAQ 回复弹药库（v3.0.2）
 
-> 原则：只写括号内确认过的特性（MV3 插件 CDP + 本地 Node 桥 localhost:9333、117 端点、snapshot+SoM、?session 隔离、30+ 维审计、batch 链式、device/media/network 模拟、MIT、v3.0.2 英文 README+Pages 站 https://aebt01.github.io/ark-web/ ），不确定的写"以仓库为准"。每条可直接复制回复。
+> 原则：只写括号内确认过的特性（MV3 插件 CDP + 本地 Node 桥 localhost:9333、154 端点、snapshot+SoM、?session 隔离、30+ 维审计、batch 链式、device/media/network 模拟、MIT、v3.0.2 英文 README+Pages 站 https://aebt01.github.io/ark-web/ ），不确定的写"以仓库为准"。每条可直接复制回复。
 
 ---
 
 ## Q1：和 browser-use / playwright-mcp 有什么区别？
 
-A：定位不同（大体对照，细节以各仓库为准）：browser-use 自带 Chromium 跑 agent 循环，登录态要另配；playwright-mcp 是 MCP 协议的 Playwright 操作层；**ark-web 是"开你的真 Chrome"**：MV3 插件走 CDP + localhost:9333 本地桥，117 个 HTTP 端点，复用你的登录态和真渲染。视觉上是一次 snapshot 拿截图+SoM 坐标锚点，多智能体靠 `?session` 服务端隔离，还自带 30+ 维审计引擎出报告。想要"AI 用我正在用的浏览器"就选 ark-web；要纯代码跑 headless 流水线，Playwright 系更合适。
+A：定位不同（大体对照，细节以各仓库为准）：browser-use 自带 Chromium 跑 agent 循环，登录态要另配；playwright-mcp 是 MCP 协议的 Playwright 操作层；**ark-web 是"开你的真 Chrome"**：MV3 插件走 CDP + localhost:9333 本地桥，154 个 HTTP 端点，复用你的登录态和真渲染。视觉上是一次 snapshot 拿截图+SoM 坐标锚点，多智能体靠 `?session` 服务端隔离，还自带 30+ 维审计引擎出报告。想要"AI 用我正在用的浏览器"就选 ark-web；要纯代码跑 headless 流水线，Playwright 系更合适。
 
 ## Q2：要不要科学上网？
 
@@ -22,7 +22,7 @@ A：ark-web 本身是本地桥：流量在"你的 Chrome ↔ 本机 bridge（loc
 
 ## Q5：和 MCP 是什么关系？需要 MCP 客户端吗？
 
-A：**不需要 MCP。** ark-web 对外是 117 个 HTTP 端点 + Skill 手册，`curl` / 任何 HTTP 客户端都能调，AI 读 `SKILL.md` 按手册调用即可。不经过 MCP 协议。如果你已有 MCP 基础设施，可以自己包一层，但官方路径就是 HTTP，以仓库为准。
+A：**不需要 MCP。** ark-web 对外是 154 个 HTTP 端点 + Skill 手册，`curl` / 任何 HTTP 客户端都能调，AI 读 `SKILL.md` 按手册调用即可。不经过 MCP 协议。如果你已有 MCP 基础设施，可以自己包一层，但官方路径就是 HTTP，以仓库为准。
 
 ## Q6：Windows 怎么装？
 
@@ -38,7 +38,7 @@ A：headless 是另起一个干净 Chromium：无登录态、指纹/字体/渲�
 
 ## Q9：耗资源吗？
 
-A：不另起浏览器进程，资源 ≈ 你的 Chrome 本身 + 一个轻量 Node 桥（HTTP 117 端点 + WebSocket）。对比"每个 agent 一个 Chromium"的方案反而更省：多智能体是 `?session` 共用一个 Chrome，标签页级隔离。snapshot 走二进制可省约 1/3 传输（以仓库为准）。机器太老的话，少开几个 session 即可。
+A：不另起浏览器进程，资源 ≈ 你的 Chrome 本身 + 一个轻量 Node 桥（HTTP 154 端点 + WebSocket）。对比"每个 agent 一个 Chromium"的方案反而更省：多智能体是 `?session` 共用一个 Chrome，标签页级隔离。snapshot 走二进制可省约 1/3 传输（以仓库为准）。机器太老的话，少开几个 session 即可。
 
 ## Q10：能商用吗？
 

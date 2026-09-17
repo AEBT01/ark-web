@@ -29,7 +29,7 @@
 
 ## English
 
-**Ark Web** is a local bridge that lets AI agents control your *real* browser — the one you actually use, with your logins and real fingerprint. No puppeteer, no separate browser instance. An MV3 Chrome extension (CDP via `chrome.debugger`) connects over WebSocket to a local Node bridge exposing 122 HTTP endpoints: navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, an atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced session isolation for parallel agents, and a 30+ rule weighted audit engine (performance / a11y / SEO / security / resources).
+**Ark Web** is a local bridge that lets AI agents control your *real* browser — the one you actually use, with your logins and real fingerprint. No puppeteer, no separate browser instance. An MV3 Chrome extension (CDP via `chrome.debugger`) connects over WebSocket to a local Node bridge exposing 154 HTTP endpoints: navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, an atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced session isolation for parallel agents, and a 30+ rule weighted audit engine (performance / a11y / SEO / security / resources).
 
 ```bash
 ./start.sh                 # Windows: start.bat   (or: cd server && npm install && node bridge-server.js)
@@ -47,14 +47,18 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
 
 ## 作为 Skill 使用(推荐)
 
-把本仓库(或其子集)复制到 `%USERPROFILE%\.agents\skills\ark-web\`,AI 即可通过 `SKILL.md` 获得全部能力手册
-(真实浏览器操控、视觉快照与编号操作、裁剪放大读小字、审计引擎、故障排查),并调用本仓库工具链执行。
+本仓库的 `SKILL.md` 就是完整的 agent 能力手册（真实浏览器操控、视觉快照与编号操作、裁剪放大读小字、
+审计引擎、故障排查）。让 AI 用上它有两种方式，选一种即可：
+
+- **就地使用**（本机开发仓就是运行位置）：告诉 agent 读 `C:\Users\画扇\browser-debug-extension\SKILL.md`。
+- **复制到 agent 的技能目录**：把本仓库（或其子集）复制到 `%USERPROFILE%\.agents\skills\ark-web\`，
+  agent 按技能名 `ark-web` 自动发现。
 
 ### 其他 AI / 新环境接入要点（**踩坑第一名，必读**）
 
-1. **先 cd 到 skill 目录**：手册与脚本里的相对路径都以此为准
+1. **先 cd 到这份仓库**：手册与脚本里的相对路径都以此为准
    ```powershell
-   cd "$env:USERPROFILE\.agents\skills\ark-web"
+   cd "$env:USERPROFILE\browser-debug-extension"   # 本机开发仓；复制到别处则 cd 到那一份
    ```
 2. **优先用 CLI**：`node client/browser-client.js status` —— **自动读取令牌，不会 401**
 3. **令牌不在 `server/.ark-token`**（旧路径已废弃），现在在 **`~/.ark-web/token`**：
@@ -80,7 +84,7 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
 │   Chrome 插件        │ ◄──────────────► │   Bridge Server     │ ◄──────────► │   AI / CLI / curl   │
 │   (extension/)      │   ws://9334      │   (server/)         │   :9333      │                     │
 │                     │                  │                     │              │  browser-client.js  │
-│  • background: CDP  │                  │  • HTTP API (122)   │              │  ark.js (别名)      │
+│  • background: CDP  │                  │  • HTTP API (154)   │              │  ark.js (别名)      │
 │  • content: 日志监控│                  │  • 日志聚合          │              │  直接 HTTP          │
 │  • popup: 授权+状态 │                  │  • 缓存/keep-alive  │              │                     │
 └─────────────────────┘                  └─────────────────────┘              └─────────────────────┘
@@ -232,7 +236,7 @@ node client/browser-client.js history https://a.com
 ```
 ark-web/
 ├── extension/            # Chrome 插件
-│   ├── manifest.json     # v3.0.1
+│   ├── manifest.json     # v3.0.2
 │   ├── background.js     # CDP 管理器 + 命令实现 + 视觉快照/ref/zoom
 │   ├── content.js        # 控制台/DOM/Storage 监控
 │   ├── popup.html/js     # 状态 + 调试授权 + 连接配置(WS 主机/端口/令牌)
@@ -290,7 +294,7 @@ ark-web/
 
 ```bash
 node scripts/package.js
-# → dist/ark-web-v3.0.1.zip (含扩展/服务端/客户端/测试/文档, 排除 node_modules 与 legacy)
+# → dist/ark-web-v3.0.2.zip (含扩展/服务端/客户端/测试/文档, 排除 node_modules 与 legacy)
 ```
 
 > 完整版本历史见 `CHANGELOG.md`; AI 使用手册见 `SKILL.md`。

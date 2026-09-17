@@ -3,7 +3,7 @@ name: ark-web
 description: 视觉优先的浏览器操控技能。通过浏览器扩展 + 本机 Bridge Server 真实操控 Chrome/夸克等 Chromium 浏览器：截图理解页面、按编号直接点击/填表、放大读小字、视觉 QA、性能审计、数据抓取、多标签并行。当需要打开网页、点击、填表、截图、抓取页面数据、测试网页、排查页面问题、做性能/可访问性审计时使用。
 ---
 
-# Ark Web — AI 浏览器控制技能 v10.2（视觉优先）
+# Ark Web — AI 浏览器控制技能 v3.0.2（视觉优先）
 
 > 真实浏览器（Chrome / 夸克等 Chromium 内核）+ 真实鼠标键盘。工作方式是**看图决策**：先截图拿到页面与可交互元素编号，再按编号操作，不依赖猜测 CSS 选择器。
 > 能力覆盖：导航 / 点击 / 填表 / 上传 / 截图放大 / PDF / 网络响应体 / 设备与媒体模拟 / Web Vitals / 30+ 维度审计 / 多标签并行。
@@ -26,13 +26,14 @@ description: 视觉优先的浏览器操控技能。通过浏览器扩展 + 本�
 
 ### 0.1 三条铁律
 
-1. **先 cd 到 skill 目录**（本手册所有相对路径都以它为准）：
+1. **先 cd 到项目目录**（本手册所有相对路径都以它为准）：
    ```powershell
-   cd "$env:USERPROFILE\.agents\skills\ark-web"     # Windows
+   cd "$env:USERPROFILE\browser-debug-extension"     # Windows
    ```
    ```bash
-   cd ~/.agents/skills/ark-web                       # macOS / Linux
+   cd ~/browser-debug-extension                       # macOS / Linux
    ```
+   本机固定位置就是这里；若你把仓库复制到别处（例如 agent 的技能目录），cd 到那一份即可。
    不想 cd 就用绝对路径调 CLI（`/health` 会返回该绝对路径）。
 
 2. **优先用 CLI**：`node client/browser-client.js`（或别名 `node ark.js`）**会自动读取令牌**，永不 401。
@@ -193,7 +194,7 @@ node client\browser-client.js chain "open https://example.com" "wait-load" "wait
 
 > 注意：**带 clip 的截图（`zoom` / `screenshot-element`）必须由合成器出图**，窗口最小化时可能超时（会返回 `degraded` 并降级为元素截图）；`/snapshot` 整屏截图已改用渲染进程出图（实测 ~0.5s）。
 
-## 2. 能力速查（122 端点）
+## 2. 能力速查（154 端点）
 
 **⚡ = 需 CDP 调试授权**（未启用时自动降级为脚本模拟）
 
@@ -303,6 +304,6 @@ curl.exe -H "X-Ark-Token: $(Get-Content "$env:USERPROFILE\.ark-web\token" -Raw)"
 
 ## 版本
 
-- 运行时版本以 `extension/manifest.json` 为准（本手册对应 v2.9.3）；`/status` 会同时给出 **server 版本**与**插件上报版本**，两者不一致说明浏览器里跑的不是最新代码。
+- 运行时版本以 `extension/manifest.json` 为准（本手册对应 v3.0.2）；`/status` 会同时给出 **server 版本**与**插件上报版本**，两者不一致说明浏览器里跑的不是最新代码。
 - 改了 `extension/` 后：`node scripts/sync.js --yes` → `POST /reload-extension` → `POST /debug/attach-all`。
 - 历史见 `CHANGELOG.md`；环境体检 `node scripts/doctor.js`。
