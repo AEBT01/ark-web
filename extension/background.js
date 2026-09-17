@@ -491,6 +491,7 @@ class ArkWeb {
     this._viewportProbe = new Map();    // tabId -> {ts, result}: 视口探测缓存(避免每条命令多一次 evaluate)
     this._pendingNav = new Map();       // tabId -> {url, ts}: 刚触发的导航, 供 wait-for-load 判定"新文档"而非旧文档
     this._activeTabId = null;
+    this.surfaceOnlyKernel = false;    // 内核对 fromSurface:false 的拒绝（夸克实测必拒）—— 观察到一次即置位，之后不再尝试该降级
     this.consoleFlushTimers = new Map(); // tabId -> timer(节流转发)
     this.dialogLogs = new Map();        // tabId -> [{message, type, url, timestamp}]
     this.init();
@@ -2449,21 +2450,43 @@ class ArkWeb {
       const isHttpLocal = u.startsWith('http://127.0.0.1') || u.startsWith('http://localhost');
       isLocalActive = isHttpLocal && tab?.active === true;
     } catch {}
+    // CDP 通道的失败原因此前被静默吞掉，只留下"请启用 CDP 调试"这种指不到点的提示。
+    // 在这里收集每一次尝试的真实错误，随兜底错误一起回传（诊断用，不影响控制流）。
+    let cdpError = null;
     if (tabId != null && !isLocalActive && await this.cdp.tryAttach(tabId)) {
-      // 夸克内核 captureScreenshot 可能 >8s(渲染忙)且间歇性失败(渲染进程退化环境实测抖动明显), 8s 超时 + 重试一次再落守卫
-      for (let attempt = 0; attempt < 2; attempt++) {
+      // 夸克内核 captureScreenshot 可能 >8s(渲染忙)且间歇性失败(渲染进程退化环境实测抖动明显), 大超时 + 多次重试再落守卫
+      //
+      // 实测(夸克 7.2 / Chromium 144, 后台标签页 + http://127.0.0.1):
+      //   attempt1 fromSurface:true  → 间歇性 8s 超时(合成器不出新帧)
+      //   attempt2 fromSurface:false → 必失败: Agent -32000 "Only screenshots from surface are allowed."
+      // 即该内核根本不接受 fromSurface:false。故一旦观察到该错误就记住(内核级)，后续不再浪费一次往返。
+      // 同时把重试次数提到 3：上面的超时是间歇的，紧接着重试往往就能出图。
+      // 实测（夸克 7.2 / Chromium 144，后台标签页 + http://127.0.0.1，10 连测）：
+      //   attempt1 fromSurface:true  → 几乎必定首轮超时（渲染进程需被"催"一次才出帧）
+      //   attempt2 fromSurface:true  → 必成功，约 1.5s
+      //   合计 ~3.2s / 次，10/10 成功（此前 8s×2 超时 + 拒绝兜底 = 50% 硬失败）
+      // 故首轮超时取 1.5s（成功时实测约 1s，不误伤），把重试机会提前拿到。
+      const MAX_ATTEMPTS = 3;
+      const ATTEMPT_TIMEOUT = [1500, 3000, 3000];
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        // 窗口不可见/最小化时优先 fromSurface:false（该内核不允许时由下面自适应关掉）
+        const fromSurface = !(this.surfaceOnlyKernel !== true && (attempt > 0 || windowInvisible));
         try {
-          // 窗口不可见/最小化时, 从合成器(默认 fromSurface:true)取帧会一直等不到新帧 → 超时。
-          // 第二轮(以及"已检测到窗口不可见"时)改为 fromSurface:false, 直接从渲染进程取图 —— 实测可稳定出图。
-          const fromSurface = !(attempt > 0 || windowInvisible);
           const shot = await this.cdp.sendWithTimeout(tabId, 'Page.captureScreenshot', {
             format, quality, ...(fromSurface ? {} : { fromSurface: false })
-          }, 8000);
+          }, ATTEMPT_TIMEOUT[attempt] || 3000);
           if (shot && typeof shot.data === 'string') {
-            return { success: true, method: 'cdp', dataUrl: `data:image/${format};base64,${shot.data}`, format, fromSurface, timestamp: Date.now() };
+            return { success: true, method: 'cdp', dataUrl: `data:image/${format};base64,${shot.data}`, format, fromSurface, attempts: attempt + 1, timestamp: Date.now() };
           }
-        } catch { /* 重试后仍失败 → 兜底守卫 */ }
-        if (attempt === 0) await new Promise(r => setTimeout(r, 400));
+          cdpError = (cdpError ? cdpError + ' | ' : '') + `attempt${attempt + 1}(fromSurface=${fromSurface}): 返回空数据`;
+        } catch (e) {
+          const msg = e && e.message ? e.message : String(e);
+          if (!fromSurface && /Only screenshots from surface/i.test(msg)) {
+            this.surfaceOnlyKernel = true;   // 内核级记忆：后续所有截图不再尝试 fromSurface:false
+          }
+          cdpError = (cdpError ? cdpError + ' | ' : '') + `attempt${attempt + 1}(fromSurface=${fromSurface}): ${msg}`;
+        }
+        if (attempt < MAX_ATTEMPTS - 1) await new Promise(r => setTimeout(r, 250));
       }
     }
     // captureVisibleTab 兜底仅对"目标=当前激活 tab"合法; 目标是后台 tab 时拒绝(防截到用户当前页面)。
@@ -2474,7 +2497,7 @@ class ArkWeb {
       activeId = t?.id ?? null;
     } catch { /* ignore */ }
     if (tabId != null && activeId != null && tabId !== activeId) {
-      return { success: false, method: 'failed', error: `截图失败: 目标 tab(${tabId}) 非当前激活 tab, captureVisibleTab 只能截激活 tab(已拒绝以防串页); 请启用 CDP 调试后重试` };
+      return { success: false, method: 'failed', cdpError: cdpError || null, error: `截图失败: 目标 tab(${tabId}) 非当前激活 tab, CDP 取帧未成功, captureVisibleTab 只能截激活 tab(已拒绝以防串页)` + (cdpError ? `; CDP 错误: ${cdpError}` : '; 请启用 CDP 调试后重试') };
     }
     // fallback 包超时: captureVisibleTab 依赖窗口可见, 非前台时可能挂起; 失败返回结构化错误而非裸 throw
     try {
@@ -2965,17 +2988,28 @@ class ArkWeb {
     const sel = data.selector || this.refSelector(data.ref);
     if (!sel && data.x == null) return { error: '需要 ref / selector / x,y,width,height 之一', hint: 'POST /act {action:"zoom", ref:3, scale:3}' };
 
-    // clip 采用与 screenshotElement 一致的视口坐标系(已 scrollIntoView, 元素必在视口内)
+    // clip 用 **视口坐标**（与 screenshotElement 一致）：CDP 的 clip 在这里按视口原点解释。
+    //
+    // 历史缺陷（实测定位）：原来是 scrollIntoView 之后**立刻**取 rect 并截图，但滚动要等下一个
+    // 渲染帧才提交到表面 —— 截图拿到的还是滚动前的画面，于是裁剪区整体错位；窗口越矮、滚动幅度
+    // 越大越明显（实测夸克/Chromium 144 会返回错位且平铺的垃圾像素，还照样报 success:true）。
+    // 现在等两帧 + 一次 DOM 静默再取 rect，保证 rect 与画面同处一个已提交的滚动位置。
     let clip;
     let targetText;
+    let vpSize = null;
     const clamp = (v, min) => Math.max(min, Math.round(v));
     if (sel) {
-      const r = await this.evaluateJS(tabId, { code: `(() => {
+      const r = await this.evaluateJS(tabId, { code: `(async () => {
         const el = document.querySelector(${JSON.stringify(sel)});
         if (!el) return null;
         el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        // 等滚动提交到渲染帧：两帧 rAF + 一次 rIC(无则退化为宏任务)
+        await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+        if (window.requestIdleCallback) { try { await new Promise(res => requestIdleCallback(res, { timeout: 150 })); } catch (e) {} }
         const b = el.getBoundingClientRect();
-        return { x: b.x, y: b.y, width: b.width, height: b.height, text: (el.innerText || el.textContent || '').trim().slice(0, 60) };
+        return { x: b.x, y: b.y, width: b.width, height: b.height,
+                 vw: window.innerWidth, vh: window.innerHeight,
+                 text: (el.innerText || el.textContent || '').trim().slice(0, 60) };
       })()`, timeout: 6000 });
       if (!r.success || !r.result) return { success: false, error: `未找到目标元素(selector=${sel})`, ref: data.ref ?? null };
       const pad = 6; // 外扩, 防止文字贴边被裁
@@ -2986,6 +3020,7 @@ class ArkWeb {
         height: Math.max(8, Math.round(r.result.height + pad * 2)),
         scale
       };
+      vpSize = { width: r.result.vw, height: r.result.vh };
       targetText = r.result.text;
     } else {
       clip = {
@@ -3001,6 +3036,29 @@ class ArkWeb {
       if (!await this.cdp.tryAttach(tabId)) throw new Error('CDP 未授权(请在插件 popup 点「启用调试」)');
       // 注意: 带 clip 的截图必须 fromSurface:true(内核会拒绝 "Only screenshots from surface are allowed"),
       // 因此这里不能用 fromSurface:false 兜底最小化窗口, 只能重试。
+      //
+      // captureBeyondViewport 必须为 false：上面 clip 取自 getBoundingClientRect()，是**视口坐标**；
+      // 而 captureBeyondViewport:true 时 CDP 把 clip 当**文档坐标**解释 —— 两者错位，裁剪区落到渲染器
+      // 未绘制的区域，实测(夸克/Chromium 144)会返回**错位且横向平铺的垃圾像素**，还照样报 success:true，
+      // 调用方无从察觉。元素已由上面的 scrollIntoView 保证在视口内，故按视口坐标系取图即可。
+      // 兜底：把 clip 夹进视口（视口坐标语义下越界会取到空白/错位），并如实标注是否被裁剪。
+      // 为什么不干脆放手让内核渲染视口外区域：实测(夸克/Chromium 144)视口外渲染会返回**平铺的
+      // 垃圾像素且照样 success:true** —— 调用方读图会得出完全错误的结论。宁可得一张"诚实的局部图"。
+      let clippedToViewport = false;
+      if (vpSize && vpSize.width > 0 && vpSize.height > 0) {
+        const vw = Math.round(vpSize.width), vh = Math.round(vpSize.height);
+        const fits = clip.width <= vw && clip.height <= vh;
+        if (!fits) {
+          clippedToViewport = true;
+          clip = {
+            ...clip,
+            x: Math.min(clip.x, Math.max(0, vw - 8)),
+            y: Math.min(clip.y, Math.max(0, vh - 8))
+          };
+          clip.width = Math.max(8, Math.min(clip.width, vw - clip.x));
+          clip.height = Math.max(8, Math.min(clip.height, vh - clip.y));
+        }
+      }
       const base = { format, quality, clip, captureBeyondViewport: true };
       let shot = null;
       let lastErr = null;
@@ -3017,6 +3075,10 @@ class ArkWeb {
         dataUrl: `data:image/${format};base64,${shot.data}`,
         format, scale, clip,
         ...(targetText ? { text: targetText } : {}),
+        ...(clippedToViewport ? {
+          clippedToViewport: true,
+          degraded: '目标大于当前视口, 已按视口边界裁剪(内核的视口外渲染不可靠, 可能返回错位像素); 需要完整视图请用 /snapshot?full=1, 或放大窗口后重试'
+        } : {}),
         timestamp: Date.now()
       };
     } catch (e) {

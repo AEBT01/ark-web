@@ -48,10 +48,11 @@ node server\bridge-server.js
 | 现象 | 说明与处置 |
 |---|---|
 | `plugin.browser` 显示 `quark` | 正常。说明确实是夸克内核，非代码问题 |
-| 个别 CDP 域不生效 | 夸克内核部分实现与官方 Chrome 有差异。已知：`Emulation.setLocaleOverride` 被忽略（本 skill 已改用脚本注入兜底 `navigator.language`）；`captureScreenshot` 在渲染忙时更易超时（已加超时重试 + `fromSurface:false` 兜底） |
+| **后台标签页截图慢（约 3s）或曾报"非当前激活 tab"** | 夸克实测：`fromSurface:false` 被内核直接拒绝（CDP `-32000 Only screenshots from surface are allowed`），所以只能走 `fromSurface:true`；而后台标签页的**首轮取帧几乎必超时**，紧接着重试必成功。v3.0.2 已按此修正：首轮超时 1.5s + 最多 3 次重试，实测 10/10 成功、平均 3.2s。若仍失败，响应里的 `cdpError` 会带每次尝试的真实错误（不再被静默吞掉）。要更快就把该标签页激活（`POST /tab/activate`）——激活页可走 `captureVisibleTab` 快路径（约 1s），但会切换用户视图 |
+| 截图报 `Only screenshots from surface are allowed` | 夸克/部分 Chromium 套壳禁止 `fromSurface:false`。插件已自适应记忆该限制（不再浪费往返尝试），无需手动处理 |
+| 个别 CDP 域不生效 | 夸克内核部分实现与官方 Chrome 有差异。已知：`Emulation.setLocaleOverride` 被忽略（本 skill 已改用脚本注入兜底 `navigator.language`） |
 | 夸克窗口最小化后命令变慢/超时 | 夸克对不可见窗口的渲染进程调度更激进 → 先 `POST /tab/activate` 激活标签页；本 skill 已内建虚拟视口兜底（视口任一维 <100 即触发，含最小化时上报的 45×14 异常小值） |
 | `device/clear` 后视口停留在设备宽度 | 夸克下 `Emulation.clearDeviceMetricsOverride` 可能不还原宽高（实测带 `<meta viewport>` 页面首次 clear 残留 390×844）。v2.9.3 已改为"写回 set 前记录的原始视口"软还原（响应带 `viewportRestore`），不再依赖 clear 命令本身；注意**不要**用 detach→attach 强清（会导致 CDP 授权失效 → throttled 降级） |
-| 截图偶发超时 | 整屏截图已改走渲染进程出图（稳定 ~0.5s）。带 `clip` 的 `zoom`/`screenshot-element` 受内核限制仍可能超时，会自动降级为元素截图并返回 `degraded` 说明 |
 | 想确认自己用的是哪个浏览器 | `node scripts/doctor.js` 会列出**每个浏览器实际加载的扩展路径**（Chrome/Quark 都会列） |
 
 ## CDP 与交互

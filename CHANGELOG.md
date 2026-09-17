@@ -39,6 +39,56 @@
   从未提交过。`verify-all.js` 已移除对 `panel-console` 的调用，其余套件路径保留原样，
   待补齐后即可恢复。
 
+## 未发布 — 夸克内核实机测试挖出的缺陷修复（2026-09-17）
+
+> 在夸克（QuarkPC/7.2.0.992，Chromium 144）上做端到端实机测试，修掉四类问题。
+> 全部改动都有实测前后对比，不是推测。
+
+### 严重：`semantic/` 缺三个真源文件，服务端**完全起不来**
+
+- `server/semantic.js` 需要 `../semantic/indexer.js`（并在运行时注入 `semantic/extractor.js`
+  与 `semantic/locate.js`），但 `semantic/` 目录在本仓**从未存在**——`require` 直接
+  `MODULE_NOT_FOUND`，`bridge-server.js` 一启动就崩。
+- `extension/injected/` 下的两个文件是**生成物**（`scripts/lib/build-injected.js` 从
+  `semantic/*` 搬运而来，文件头写着「请勿直接编辑」）。真源丢失、只剩生成物。
+- 恢复方式：`semantic/extractor.js` 与 `semantic/locate.js` 由生成物去掉横幅行反推；
+  `semantic/indexer.js`（BM25 检索层，零依赖宿主无关）取自同源的 Ark BrowserOS 仓。
+- **自证**：以恢复后的真源重跑 `build-injected.refresh()`，报告「无变化」——
+  即反推结果与生成物逐字节一致。
+
+### 截图：后台标签页 50% 硬失败 → 100% 成功
+
+- **CDP 通道的真实失败原因此前被静默吞掉**（`catch {}`），只留下「请启用 CDP 调试」这种
+  指不到点的提示。现在每次尝试的错误随响应回传（`cdpError`）。
+- 拿回错误后定位到：`attempt1 fromSurface:true` 间歇 8s 超时；`attempt2 fromSurface:false`
+  **必失败** —— 夸克拒绝该参数（`-32000 Only screenshots from surface are allowed.`）。
+- 修法：内核对 `fromSurface:false` 的拒绝**记一次即不再尝试**（`surfaceOnlyKernel`，
+  跨调用生效）；重试次数 2 → 3；首轮超时 8s → 1.5s（成功时实测约 1s）。
+- **实测**：修复前 6 连测 3 成功 3 失败（失败耗时 9.2s）；修复后 10 连测 **10/10 成功**、
+  平均 3.2s，下降 65%。
+
+### 截图：`zoom` / 元素裁剪返回**错位且平铺的垃圾像素**，却报 `success: true`
+
+- 根因是竞态：`scrollIntoView({behavior:'instant'})` 之后**立刻**取 rect 并截图，
+  而滚动要等下一个渲染帧才提交到表面 —— 截图拿到的还是滚动前的画面，裁剪区整体错位；
+  窗口越矮、滚动幅度越大越明显。调用方看 `success: true` 无从察觉，会据此得出错误结论。
+- 修法：取 rect 前等两帧 `requestAnimationFrame` + 一次 `requestIdleCallback`（150ms 超时）。
+- 另外：目标大于视口时，内核的视口外渲染同样不可靠（实测返回平铺像素），
+  现在夹到视口边界并回传 `clippedToViewport` + `degraded` 说明，宁可给「诚实的局部图」，
+  不让调用方拿到垃圾。修后 `h1` 等视口内目标的 zoom 实测正确。
+
+### mock-server：正斜杠路径必 403
+
+- `MOCK_DIR` 以正斜杠传入（`C:/Users/...`）时，`ROOT` 未归一化，`file.startsWith(ROOT)`
+  永不成立 → 所有请求 403。已改为 `path.resolve(pickRoot())`。
+- 顺带把越界判定从「字符串前缀」换成 `path.relative`：旧写法会放行同前缀的兄弟目录
+  （`mock-site-evil` 之于 `mock-site`），实测确认该场景现已 403。
+
+### 文档
+
+- `references/troubleshooting.md` 的夸克节更新为实测结论（原先写的 `fromSurface:false 兜底`
+  在夸克上根本不成立）；删除过时的「截图偶发超时」行，并入新的量化结论。
+
 ## v3.0.2 (2026-09-14) — 独立审查后的修复批次：安全闸门、上下文与验证可信度
 
 > 背景：请了 6 个互不相通、无上下文的审查代理从不同角度独立审，共报 60+ 条。

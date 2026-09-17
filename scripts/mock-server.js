@@ -24,7 +24,9 @@ function pickRoot() {
   }
   return cands[cands.length - 1];
 }
-const ROOT = pickRoot();
+// 归一化：MOCK_DIR 常以正斜杠传入（C:/Users/...），而 path.join 产出反斜杠；
+// 不归一化会让下面的前缀校验（startsWith）永远不成立 → 所有请求 403。
+const ROOT = path.resolve(pickRoot());
 const PORT = parseInt(process.env.MOCK_PORT || '8899', 10);
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -46,7 +48,9 @@ http.createServer((req, res) => {
     return;
   }
   const file = path.normalize(path.join(ROOT, urlPath === '/' ? 'index.html' : urlPath));
-  if (!file.startsWith(ROOT)) {
+  // 用相对路径判越界（比字符串前缀更可靠：跨盘符、大小写、以及 mock-site 与 mock-site-evil 这类同前缀目录）
+  const rel = path.relative(ROOT, file);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
     res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('forbidden');
     return;
