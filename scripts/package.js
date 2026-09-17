@@ -160,7 +160,10 @@ function main() {
     platform: process.platform,
     components: {
       extension: JSON.parse(fs.readFileSync(path.join(ROOT, 'extension', 'manifest.json'), 'utf8')).version,
-      panel: JSON.parse(fs.readFileSync(path.join(ROOT, 'panel', 'manifest.json'), 'utf8')).version,
+      // panel 属于独立项目（Ark BrowserOS），本仓已无此目录 —— 存在才收录，缺失不报错
+      ...(fs.existsSync(path.join(ROOT, 'panel', 'manifest.json'))
+        ? { panel: JSON.parse(fs.readFileSync(path.join(ROOT, 'panel', 'manifest.json'), 'utf8')).version }
+        : {}),
       server: JSON.parse(fs.readFileSync(path.join(ROOT, 'server', 'package.json'), 'utf8')).version
     },
     files: files.length,

@@ -10,7 +10,7 @@
  *  - --url: 指定测试页 URL(默认内置本地服务器)
  */
 const http = require('http');
-// 连接参数与令牌统一从 client 解析(自动读取 server/.ark-token, 支持 ARK_PORT/ARK_TOKEN)
+// 连接参数与令牌统一从 client 解析(自动读取 ~/.ark-web/token, 支持 ARK_PORT/ARK_TOKEN)
 const { resolveConnection } = require('../client/browser-client');
 const CONN = resolveConnection();
 const HOST = CONN.host, PORT = CONN.port, TOKEN = CONN.token;

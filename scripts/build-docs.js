@@ -11,7 +11,7 @@
  * 先整体转义再生成白名单标签 —— 文档里出现 HTML 也不会被当成标签执行。
  *
  * 用法:
- *   node scripts/build-docs.js                     # 渲染 docs/产品使用说明书.md → docs/index.html
+ *   node scripts/build-docs.js                     # 渲染 README.md → docs/README.html
  *   node scripts/build-docs.js --in=<md> --out=<html>
  */
 
@@ -20,8 +20,8 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const argOf = (n) => { const hit = process.argv.find((a) => a.startsWith(n + '=')); return hit ? hit.slice(n.length + 1) : null; };
-const IN = path.join(ROOT, argOf('--in') || path.join('docs', '产品使用说明书.md'));
-const OUT = path.join(ROOT, argOf('--out') || path.join('docs', 'index.html'));
+const IN = path.join(ROOT, argOf('--in') || 'README.md');
+const OUT = path.join(ROOT, argOf('--out') || path.join('docs', 'README.html'));
 
 /* ── 行内格式 ── */
 function esc(s) {
@@ -175,7 +175,11 @@ box-shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06)}
 `;
 
 function main() {
-  if (!fs.existsSync(IN)) { console.error('找不到输入: ' + IN); process.exit(1); }
+  if (!fs.existsSync(IN)) {
+    console.error('找不到输入文件: ' + IN);
+    console.error('  用法: node scripts/build-docs.js [--in=<markdown>] [--out=<html>]（默认 README.md → docs/README.html）');
+    process.exit(1);
+  }
   const md = fs.readFileSync(IN, 'utf8');
   const { body, toc } = render(md);
 

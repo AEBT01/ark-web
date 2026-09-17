@@ -17,7 +17,7 @@ const path = require('path');
 const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 20, keepAliveMsecs: 8000, maxFreeSockets: 10, timeout: 45000 });
 keepAliveAgent.on('free', () => {}); // 占位，避免 freeSockets 泄漏告警
 
-/** 统一的连接参数解析: 显式参数 > 环境变量 > server/.ark-token 文件 > 默认值
+/** 统一的连接参数解析: 显式参数 > 环境变量 > 令牌文件(优先 ~/.ark-web/token) > 默认值
  *  server 默认绑定 127.0.0.1 并启用令牌鉴权, 因此客户端默认也要带上令牌。 */
 function resolveConnection(overrides = {}) {
   const host = overrides.host || process.env.ARK_HOST || '127.0.0.1';
@@ -91,7 +91,7 @@ class BrowserClient {
           try { parsed = JSON.parse(data); }
           catch { parsed = { raw: data }; }
           if (res.statusCode === 401 && !parsed.hint) {
-            parsed.hint = '访问令牌缺失或不匹配。CLI 会自动读取 server/.ark-token; 若已改端口/令牌, 用 --port/--token 指定。';
+            parsed.hint = '访问令牌缺失或不匹配。CLI 会自动读取 ~/.ark-web/token; 若已改端口/令牌, 用 --port/--token 指定。';
           }
           resolve(parsed);
         });
@@ -1190,7 +1190,7 @@ Cookie:      cookies | cookie-set <name> <value> | cookie-remove <name> [url]
   run();
 }
 
-// 暴露连接参数解析(脚本/测试可直接复用: 自动从 server/.ark-token 读令牌、从环境变量读端口)
+// 暴露连接参数解析(脚本/测试可直接复用: 自动从 ~/.ark-web/token 读令牌、从环境变量读端口)
 BrowserClient.resolveConnection = resolveConnection;
 
 module.exports = BrowserClient;
