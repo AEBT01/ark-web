@@ -1,0 +1,446 @@
+[
+ {
+  "text": "use strict"
+ },
+ {
+  "text": "Close toast"
+ },
+ {
+  "text": "M12 9v4"
+ },
+ {
+  "text": "M5 12l5 5l10 -10"
+ },
+ {
+  "text": "M6 9l6 6l6 -6"
+ },
+ {
+  "text": "M15 6l-6 6l6 6"
+ },
+ {
+  "text": "M9 6l6 6l-6 6"
+ },
+ {
+  "text": "M6 15l6 -6l6 6"
+ },
+ {
+  "text": "M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"
+ },
+ {
+  "text": "M9 12l2 2l4 -4"
+ },
+ {
+  "text": "M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"
+ },
+ {
+  "text": "M12 9h.01"
+ },
+ {
+  "text": "M11 12h1v4h1"
+ },
+ {
+  "text": "M12 6l0 -3"
+ },
+ {
+  "text": "M16.25 7.75l2.15 -2.15"
+ },
+ {
+  "text": "M18 12l3 0"
+ },
+ {
+  "text": "M16.25 16.25l2.15 2.15"
+ },
+ {
+  "text": "M12 18l0 3"
+ },
+ {
+  "text": "M7.75 16.25l-2.15 2.15"
+ },
+ {
+  "text": "M6 12l-3 0"
+ },
+ {
+  "text": "M7.75 7.75l-2.15 -2.15"
+ },
+ {
+  "text": "M8 9l4 -4l4 4"
+ },
+ {
+  "text": "M16 15l-4 4l-4 -4"
+ },
+ {
+  "text": "M18 6l-12 12"
+ },
+ {
+  "text": "M6 6l12 12"
+ },
+ {
+  "text": "M5 12h14"
+ },
+ {
+  "text": "M7 7h10v10"
+ },
+ {
+  "text": "M12 7v14"
+ },
+ {
+  "text": "M12 8V4H8"
+ },
+ {
+  "text": "M20 6 9 17l-5-5"
+ },
+ {
+  "text": "M12 15V3"
+ },
+ {
+  "text": "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"
+ },
+ {
+  "text": "M15 3h6v6"
+ },
+ {
+  "text": "M10 14 21 3"
+ },
+ {
+  "text": "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"
+ },
+ {
+  "text": "M3 3v5h5"
+ },
+ {
+  "text": "M12 7v5l4 2"
+ },
+ {
+  "text": "M21 12a9 9 0 1 1-6.219-8.56"
+ },
+ {
+  "text": "M12.586 12.586 19 19"
+ },
+ {
+  "text": "M7.5 13.5 10 11"
+ },
+ {
+  "text": "M10.5 16.5 13 14"
+ },
+ {
+  "text": "M12 5v14"
+ },
+ {
+  "text": "M21 3v5h-5"
+ },
+ {
+  "text": "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"
+ },
+ {
+  "text": "M8 16H3v5"
+ },
+ {
+  "text": "M15 12h-5"
+ },
+ {
+  "text": "M15 8h-5"
+ },
+ {
+  "text": "M19 17V5a2 2 0 0 0-2-2H4"
+ },
+ {
+  "text": "M14 17H5"
+ },
+ {
+  "text": "M12 4v16"
+ },
+ {
+  "text": "M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"
+ },
+ {
+  "text": "M9 20h6"
+ },
+ {
+  "text": "M18 6 6 18"
+ },
+ {
+  "text": "Failed to gzip compress data"
+ },
+ {
+  "text": "NT 3.11"
+ },
+ {
+  "text": "NT 4.0"
+ },
+ {
+  "text": "UC Browser"
+ },
+ {
+  "text": "PostHog logs flush failed:"
+ },
+ {
+  "text": "Metric series cap reached ("
+ },
+ {
+  "text": "Metrics flush failed:"
+ },
+ {
+  "text": "with message: '"
+ },
+ {
+  "text": "failed to load script"
+ },
+ {
+  "text": "is quota limited."
+ },
+ {
+  "text": "PostHog request timed out"
+ },
+ {
+  "text": "Not a valid UUID"
+ },
+ {
+  "text": "Bad HTTP status:"
+ },
+ {
+  "text": "PostHog JS"
+ },
+ {
+  "text": "Discard IP data"
+ },
+ {
+  "text": "You've disabled debug mode."
+ },
+ {
+  "text": "is deprecated. Please use"
+ },
+ {
+  "text": "Feature flag request failed"
+ },
+ {
+  "text": "Failed to capture feature flag call"
+ },
+ {
+  "text": "All overrides cleared"
+ },
+ {
+  "text": "Flag overrides set"
+ },
+ {
+  "text": "Flag overrides cleared"
+ },
+ {
+  "text": "Payload overrides cleared"
+ },
+ {
+  "text": "Payload overrides set"
+ },
+ {
+  "text": "Early access feature request failed"
+ },
+ {
+  "text": "Early access feature callback failed"
+ },
+ {
+  "text": "failed to start"
+ },
+ {
+  "text": "Site app with id"
+ },
+ {
+  "text": "Surveys loaded successfully"
+ },
+ {
+  "text": "Surveys of type"
+ },
+ {
+  "text": "PostHog metrics flush failed:"
+ },
+ {
+  "text": "Sample rate ("
+ },
+ {
+  "text": "left blocked url"
+ },
+ {
+  "text": "the audit is"
+ },
+ {
+  "text": "the audit."
+ },
+ {
+  "text": "Clear search"
+ },
+ {
+  "text": "Load older tasks"
+ },
+ {
+  "text": "Copy task"
+ },
+ {
+  "text": "Better Stack"
+ },
+ {
+  "text": "View all activity"
+ },
+ {
+  "text": "Claude Code"
+ },
+ {
+  "text": "Failed to rebuild"
+ },
+ {
+  "text": "No browser activity"
+ },
+ {
+  "text": "Last frame"
+ },
+ {
+  "text": "Follow live"
+ },
+ {
+  "text": "All time"
+ },
+ {
+  "text": "all time"
+ },
+ {
+  "text": "last 30 days"
+ },
+ {
+  "text": "last 7 days"
+ },
+ {
+  "text": "all releases"
+ },
+ {
+  "text": "Claude Desktop"
+ },
+ {
+  "text": "Give Claude Desktop a real browser."
+ },
+ {
+  "text": "Show me how"
+ },
+ {
+  "text": "M320 224V352H192V224H320Z"
+ },
+ {
+  "text": "M0 0h96v96H0z"
+ },
+ {
+  "text": "the cockpit."
+ },
+ {
+  "text": "Restart playback"
+ },
+ {
+  "text": "Audit trail"
+ },
+ {
+  "text": "Resume follow"
+ },
+ {
+  "text": "Delete this task?"
+ },
+ {
+  "text": "This removes"
+ },
+ {
+  "text": "Delete task"
+ },
+ {
+  "text": "New task"
+ },
+ {
+  "text": "Saved as /"
+ },
+ {
+  "text": "Save task"
+ },
+ {
+  "text": "Leave empty to clear"
+ },
+ {
+  "text": "Success rate"
+ },
+ {
+  "text": "No tasks yet"
+ },
+ {
+  "text": "Collapse all"
+ },
+ {
+  "text": "use strict"
+ },
+ {
+  "text": "Expected object"
+ },
+ {
+  "text": "Segoe UI"
+ },
+ {
+  "text": "Helvetica Neue"
+ },
+ {
+  "text": "M21 3v5h-5"
+ },
+ {
+  "text": "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"
+ },
+ {
+  "text": "M8 16H3v5"
+ },
+ {
+  "text": "BrowserOS (Reporter fallback)"
+ },
+ {
+  "text": "M20 6 9 17l-5-5"
+ },
+ {
+  "text": "M5 12h14"
+ },
+ {
+  "text": "M12 5v14"
+ },
+ {
+  "text": "M9 18h6"
+ },
+ {
+  "text": "M10 22h4"
+ },
+ {
+  "text": "Bug report submitted"
+ },
+ {
+  "text": "Feature request submitted"
+ },
+ {
+  "text": "Bug Report"
+ },
+ {
+  "text": "Feature Request"
+ },
+ {
+  "text": "Submit feedback"
+ },
+ {
+  "text": "Report type"
+ },
+ {
+  "text": "Update available"
+ },
+ {
+  "text": "Update status"
+ },
+ {
+  "text": "Up to date"
+ },
+ {
+  "text": "Last checked:"
+ },
+ {
+  "text": "GitHub Repository"
+ },
+ {
+  "text": "Twitter / X"
+ },
+ {
+  "text": "Update Now"
+ }
+]

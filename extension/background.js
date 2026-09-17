@@ -610,23 +610,101 @@ class ArkWeb {
 
   async loadWsConfig() {
     try {
-      const cfg = await chrome.storage.local.get(['arkWsHost', 'arkWsPort', 'arkWsToken']);
+      const cfg = await chrome.storage.local.get(['arkWsHost', 'arkWsPort', 'arkWsToken', 'arkLabel']);
       if (cfg.arkWsHost) this.wsHost = String(cfg.arkWsHost).trim();
       if (cfg.arkWsPort) this.serverPort = parseInt(cfg.arkWsPort, 10) || 9334;
       this.wsToken = cfg.arkWsToken ? String(cfg.arkWsToken).trim() : '';
+      this.label = cfg.arkLabel ? String(cfg.arkLabel).trim() : '';
     } catch { /* storage 不可用时用默认值 */ }
-    return { host: this.wsHost, port: this.serverPort, token: this.wsToken };
+    return { host: this.wsHost, port: this.serverPort, token: this.wsToken, label: this.label || this.defaultLabel() };
+  }
+
+  /** 默认连接名：多个浏览器同时连服务时用它区分命令发给谁（popup 可改）。
+   *  BrowserOS 的 UA 与 Chrome 一致，单看 UA 认不出来 —— 但它自带 neo 扩展，
+   *  用 management 权限按扩展清单反查即可确认"这就是产品浏览器"。 */
+  defaultLabel() {
+    if (this._labelCache) return this._labelCache;
+    this._labelCache = this.detectKernel();
+    return this._labelCache;
+  }
+
+  /** 异步精化：认得出"这是产品浏览器"就把连接名升级为 browseros。
+   *
+   *  实测坑一：BrowserOS 的 UA 与 Chrome 完全一致，按 UA 认不出来；neo 扩展在
+   *  chrome.management.getAll() 里也看不到（Chromium 只回部分条目）。可靠的信号是
+   *  本产品自己的侧边栏面板「Ark 助手」装在哪个浏览器里。
+   *  实测坑二：SW 刚启动时 getAll() 返回的清单不全（面板可能还没进清单），
+   *  所以这里带重试，并且注册是"先发基础名、升级后补发"，不让精化拖慢连接。 */
+  async refineLabel(retries) {
+    if (this.label) return this.label;   // 用户显式设过就不动
+    const tries = retries || 3;
+    for (let i = 0; i < tries; i++) {
+      try {
+        if (chrome.management && chrome.management.getAll) {
+          const all = await chrome.management.getAll();
+          const hit = all.some(function (e) {
+            var name = String(e.name || '');
+            var id = String(e.id || '');
+            return name.indexOf('助手') >= 0 || /^neo$/i.test(name) || /browseros/i.test(name)
+              || id === 'pjimfkbpehlcllblajnpfamdfjhhlgkc';
+          });
+          if (hit) { this._labelCache = 'browseros'; return this._labelCache; }
+        }
+      } catch (e) { /* 没有 management 权限时保持内核名 */ }
+      if (i < tries - 1) await new Promise(function (r) { setTimeout(r, 700 * (i + 1)); });
+    }
+    return this._labelCache || this.defaultLabel();
+  }
+
+  /** 发送注册消息（记录本次实际发出的连接名，供精化后判断是否需要补发） */
+  sendRegister() {
+    this._sentLabel = this.label || this.defaultLabel();
+    this.send({
+      type: 'register',
+      data: {
+        // 真实内核标识: 扩展本身跑在 chromium 内核上, 但用户实际可能用夸克/Edge 等套壳浏览器
+        browser: this.detectKernel(),
+        // 连接名: 多浏览器共存时服务端按它定向（?browser= 或 ARK_PREFER_BROWSER），popup 可改
+        label: this._sentLabel,
+        // 本扩展自己的 ID：服务端据此查本机映射表（scripts/label-browsers.js 生成），
+        // 比 UA / 运行时探测都可靠
+        extId: chrome.runtime.id,
+        // 本扩展代码指纹：服务端与磁盘上的 extension/background.js 比对。
+        // 存在意义：--load-extension 启动方式下，浏览器会把服务工作线程的**脚本**缓存在
+        // profile 里，改了代码重启浏览器也可能仍跑旧脚本（manifest 是新读的、脚本不是），
+        // 表现为"改了半天没生效"。带上指纹，服务端即可一句话点破。
+        build: this._buildTag || null,
+        version: chrome.runtime.getManifest().version,
+        cdp: true,
+        timestamp: Date.now()
+      }
+    });
+  }
+
+  /** 计算自身代码指纹（对 background.js 取 SHA-256 前 8 位十六进制） */
+  async buildStamp() {
+    if (this._buildTag) return this._buildTag;
+    try {
+      const r = await fetch(chrome.runtime.getURL('background.js'));
+      const buf = await r.arrayBuffer();
+      const d = await crypto.subtle.digest('SHA-256', buf);
+      const hex = Array.from(new Uint8Array(d)).slice(0, 4)
+        .map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+      this._buildTag = hex;
+    } catch (e) { this._buildTag = null; }
+    return this._buildTag;
   }
 
   async saveWsConfig(partial = {}) {
     const next = {
       ...(partial.host != null ? { arkWsHost: String(partial.host).trim() } : {}),
       ...(partial.port != null ? { arkWsPort: String(parseInt(partial.port, 10) || 9334) } : {}),
-      ...(partial.token != null ? { arkWsToken: String(partial.token).trim() } : {})
+      ...(partial.token != null ? { arkWsToken: String(partial.token).trim() } : {}),
+      ...(partial.label != null ? { arkLabel: String(partial.label).trim() } : {})
     };
     await chrome.storage.local.set(next);
     await this.loadWsConfig();
-    return { host: this.wsHost, port: this.serverPort, token: this.wsToken };
+    return { host: this.wsHost, port: this.serverPort, token: this.wsToken, label: this.label || this.defaultLabel() };
   }
 
   // ============ WebSocket 管理 ============
@@ -645,16 +723,14 @@ class ArkWeb {
       this.ws = new WebSocket(`ws://${host}:${this.serverPort}${qs}`);
       this.ws.onopen = () => {
         this.connected = true;
-        this.send({
-          type: 'register',
-          data: {
-            // 真实内核标识: 扩展本身跑在 chromium 内核上, 但用户实际可能用夸克/Edge 等套壳浏览器
-            browser: this.detectKernel(),
-            version: chrome.runtime.getManifest().version,
-            cdp: true,
-            timestamp: Date.now()
-          }
-        });
+        // 先注册（不让精化拖慢连接建立），再后台精化连接名与代码指纹；有变化就补发一次注册
+        this.sendRegister();
+        this.buildStamp().then((b) => {
+          if (b && b !== this._sentBuild) { this._sentBuild = b; this.sendRegister(); }
+          return this.refineLabel();
+        }).then((lbl) => {
+          if (lbl && lbl !== this._sentLabel) this.sendRegister();
+        }).catch(function () { });
         this.notifyPopup({ type: 'connection-status', connected: true });
       };
       this.ws.onmessage = (event) => {
@@ -876,6 +952,7 @@ class ArkWeb {
 
       // ---------- JS 执行 / 等待 ----------
       case 'evaluate': return this.evaluateJS(tabId, data);
+      case 'semantic-run': return this.semanticRun(tabId, data);
       case 'wait-for-selector': return this.waitForSelector(tabId, data);
       case 'wait-for-text': return this.waitForText(tabId, data);
       case 'wait-for-url': return this.waitForUrl(tabId, data);
@@ -1661,21 +1738,37 @@ class ArkWeb {
       return this.runInPage(tabId, (xx, yy, tt, dx, dy) => {
         const el = document.elementFromPoint(xx, yy);
         if (!el) return { success: false, error: 'no element at point' };
+        // 可点击祖先：命中的常常是按钮内的图标元素（SVG path / span / img），
+        // 真正带事件监听的是它外层的 button/a 等。
+        const target = (el.closest && el.closest('button,a,[role=button],[role=link],input,label,select,textarea,[onclick]')) || el;
+        // 统一派发"完整且冒泡"的事件序列。
+        // 为什么不用 el.click()：SVG 元素没有 click() 方法 —— 实测点悬浮按钮（图标在 SVG path 上）
+        // 会抛 "el.click is not a function"，而调用方看到的是"点击成功"，于是点击静默失效。
+        const mk = (type) => {
+          const init = { bubbles: true, cancelable: true, composed: true, view: window, clientX: xx, clientY: yy, button: 0 };
+          try { return new MouseEvent(type, init); } catch (e) { return null; }
+        };
+        const fire = (node, type) => { const ev = mk(type); if (ev && node && node.dispatchEvent) node.dispatchEvent(ev); };
+        const pointer = (node, type) => {
+          if (typeof PointerEvent !== 'function' || !node || !node.dispatchEvent) return;
+          try { node.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, composed: true, clientX: xx, clientY: yy, pointerType: 'mouse', isPrimary: true })); } catch (e) { /* ignore */ }
+        };
         if (tt === 'move' || tt === 'hover') {
-          el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-          return { success: true, method: 'script-move' };
+          fire(target, 'pointerover'); pointer(target, 'pointerenter'); fire(target, 'mouseover'); fire(target, 'mousemove');
+          return { success: true, method: 'script-move', hit: el.tagName, target: target.tagName };
         }
         if (tt === 'click') {
-          el.click();
-          return { success: true, method: 'script-click' };
+          pointer(el, 'pointerdown'); fire(el, 'mousedown'); pointer(el, 'pointerup'); fire(el, 'mouseup');
+          fire(target, 'click');
+          return { success: true, method: 'script-click', hit: el.tagName, target: target.tagName };
         }
         if (tt === 'down') {
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-          return { success: true, method: 'script-down' };
+          pointer(el, 'pointerdown'); fire(el, 'mousedown');
+          return { success: true, method: 'script-down', hit: el.tagName, target: target.tagName };
         }
         if (tt === 'up') {
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-          return { success: true, method: 'script-up' };
+          pointer(el, 'pointerup'); fire(el, 'mouseup');
+          return { success: true, method: 'script-up', hit: el.tagName, target: target.tagName };
         }
         if (tt === 'wheel') {
           // 脚本兜底的滚轮: 对命中元素的可滚动祖先或 window 滚动(throttled 下 CDP Input 不可靠)
@@ -2099,6 +2192,67 @@ class ArkWeb {
       catch { return { success: true, result: r.result }; }
     }
     return { success: false, error: r?.error };
+  }
+
+  /**
+   * 语义提取/定位 —— 不求值通道。
+   *
+   * 为什么需要专门一条命令：MV3 扩展上下文禁止字符串求值（CSP 里没有 unsafe-eval），
+   * 所以「把源码拼成字符串再 eval」这种注入，在调试通道不可用时必然报
+   * "Evaluating a string as JavaScript violates CSP"。而语义定位是 agent 的首选定位方式，
+   * 不该依赖用户先点「启用调试」。
+   *
+   * 这条路走 chrome.scripting.executeScript({ files })，由浏览器自己注入打包好的文件
+   * （不经 eval，因此不受页面 CSP 与扩展 CSP 限制），再用 func 调用它暴露的全局对象。
+   * 文件由 scripts/sync.js 从 semantic/ 生成到 extension/injected/，保持单一来源。
+   *
+   *   task=extract → injected/extractor.js → ArkSemantic.extractSemanticUnits(document, opts)
+   *   task=locate  → injected/locate.js    → ArkSemanticLocate.locate(spec)
+   */
+  async semanticRun(tabId, data) {
+    const { task, opts, spec } = data || {};
+    const PLAN = {
+      extract: { file: 'injected/extractor.js', global: 'ArkSemantic', call: 'extractSemanticUnits', args: [null, opts || {}] },
+      locate: { file: 'injected/locate.js', global: 'ArkSemanticLocate', call: 'locate', args: [spec] }
+    };
+    const plan = PLAN[task];
+    if (!plan) return { success: false, error: `未知 task: ${task}（支持 extract / locate）` };
+    if (tabId == null) return { success: false, error: 'No active tab' };
+
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: [plan.file] });
+    } catch (e) {
+      return {
+        success: false,
+        error: `注入 ${plan.file} 失败: ${e.message || e}。`
+          + '若提示文件不存在，请在仓库执行 node scripts/sync.js --yes 生成 extension/injected/ 后重载插件。'
+      };
+    }
+    let results;
+    try {
+      results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (g, c, payload, isExtract) => {
+          const api = globalThis[g];
+          if (!api) return { __arkMissing: true };
+          try {
+            return { value: isExtract ? api[c](document, payload) : api[c](payload) };
+          } catch (e) {
+            return { __arkError: String((e && e.message) || e) };
+          }
+        },
+        args: [plan.global, plan.call, task === 'extract' ? (opts || {}) : spec, task === 'extract']
+      });
+    } catch (e) {
+      return { success: false, error: `执行注入脚本失败: ${e.message || e}` };
+    }
+    const out = results && results[0] && results[0].result;
+    if (!out) return { success: false, error: '注入执行无返回值（可能被页面拦截或标签页已关闭）' };
+    if (out.__arkMissing) {
+      return { success: false, error: `${plan.file} 未暴露 ${plan.global}。请执行 node scripts/sync.js --yes 后重载插件。` };
+    }
+    if (out.__arkError) return { success: false, error: '页面脚本错误: ' + out.__arkError };
+    return { success: true, via: 'inject', result: out.value };
   }
 
   // ============ 等待 ============
@@ -4217,7 +4371,7 @@ class ArkWeb {
         default: sendResponse({ error: `Unknown message type: ${type}` });
       }
     } catch (e) {
-      sendResponse({ error: e.message });
+      sendResponse({ error: translateError(e && e.message), hint: errorHint(e && e.message) });
     }
   }
 
@@ -4227,6 +4381,57 @@ class ArkWeb {
 }
 
 // ============ 工具 ============
+
+/**
+ * 把 Chromium 抛出的英文错误翻译成"说清发生了什么"的中文。
+ *
+ * 触发这次改动的是一个真实体验问题：当活动标签页是扩展页面时，命令会报
+ * "Cannot access a chrome-extension:// URL of different extension" —— 用户看不懂，
+ * 也不知道该做什么（原因其实很简单：网页脚本无法操作别的扩展的页面）。
+ */
+const ERROR_TRANSLATIONS = [
+  { re: /Cannot access a chrome-extension:\/\/ URL of different extension/i,
+    text: '当前标签页是另一个扩展的页面（chrome-extension://），扩展无法在其上执行操作。' },
+  { re: /Cannot access contents of (the )?url "?(chrome|edge|about|devtools)[^"]*"?/i,
+    text: '当前标签页是浏览器内部页面（chrome:// 等），浏览器禁止扩展在此类页面上执行操作。' },
+  { re: /No tab with id|Invalid tab ID/i,
+    text: '目标标签页已关闭或不存在。' },
+  { re: /Cannot access contents of url|Missing host permission for the tab/i,
+    text: '插件缺少该页面的访问权限（可能刚装好还没授权，或页面属于受限域）。' },
+  { re: /The extensions gallery cannot be scripted|chrome\.google\.com\/webstore/i,
+    text: 'Chrome 应用商店页面禁止扩展操作。' },
+  { re: /Frame with ID .* was removed|No frame with given id/i,
+    text: '目标 iframe 已被移除或重新加载。' },
+  { re: /Receiving end does not exist/i,
+    text: '页面里的插件脚本未就绪（多为页面刚导航或插件刚重载）。稍后重试或刷新页面。' }
+];
+
+function translateError(msg) {
+  const s = String(msg || '');
+  for (const t of ERROR_TRANSLATIONS) {
+    if (t.re.test(s)) return t.text + '（原始信息: ' + s.slice(0, 160) + '）';
+  }
+  return s;
+}
+
+/** 配套的下一步建议（可选字段，服务端/面板可直接展示） */
+function errorHint(msg) {
+  const s = String(msg || '');
+  if (/chrome-extension:\/\/ URL of different extension/i.test(s)) {
+    return '把这个标签页切到普通网页（http/https），或在请求里指定 tabId/url 指向要操作的页面。';
+  }
+  if (/chrome:\/\/|内部页面/.test(s)) {
+    return '浏览器内部页面不支持自动化操作，请换到 http/https 页面。';
+  }
+  if (/No tab with id|Invalid tab ID|已关闭/.test(s)) {
+    return '先 GET /tabs 取当前可用标签页，再用返回的 id 重试。';
+  }
+  if (/Receiving end does not exist|未就绪/.test(s)) {
+    return '等待页面加载完成（/wait-for-load）或刷新后重试。';
+  }
+  return null;
+}
+
 
 function safeSerialize(value) {
   const seen = new WeakSet();

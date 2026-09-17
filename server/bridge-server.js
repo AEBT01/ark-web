@@ -23,6 +23,15 @@ const path = require('path');
 const { AsyncLocalStorage } = require('async_hooks');
 const auditEngine = require('./audit');
 const auditReport = require('./audit-report');
+const SemanticLayer = require('./semantic');
+const brain = require('./brain');
+const { createRegistry } = require('./tool-registry');
+const { CdpCore } = require('./browser-core');
+const { TaskRunner } = require('./task-runner');
+const { Router } = require('./core/router');
+const { createHttpShell } = require('./core/http-shell');
+const ENDPOINT_DOCS = require('./core/endpoint-docs');
+const capabilities = require('./capabilities');
 
 // 令牌文件: 首次启动自动生成并落盘(权限 0600), 之后固定复用 —— CLI/脚本据此自动带上 X-Ark-Token
 // 目录里可能同时存在多份项目副本(开发仓库 / 技能安装目录), 各自生成令牌会导致"服务端与 CLI 令牌不一致"的 401。
@@ -89,6 +98,48 @@ class ArkWebServer {
     // Server keep-alive 调优(v8)
     // snapshot 缓存 400ms, 高频连续 snapshot 命中 <5ms
     this.snapshotTtl = 400;
+    // 语义层: 页面消化 + 检索 + 锚点定位/动作执行(按标签页隔离, 索引常驻内存)
+    this.semantic = new SemanticLayer(this);
+    // CDP 直连内核: 直连 BrowserOS 自带的调试端口(默认 9110), 提供不依赖扩展的完整控制通道
+    // (扩展通道受 API 白名单裁剪、且受扩展生命周期影响; 内核通道能力面 = 完整 CDP 协议)
+    // 必须先于工具注册表创建：风险门禁要靠内核读元素文本（不能依赖扩展通道）
+    this.cdp = new CdpCore({ port: +(process.env.ARK_CDP_PORT || 9110) });
+    // 工具插件注册表: 能力以插件形式注册(schema + 风险等级 + 处理器), 供大脑按需调用/裁剪
+    this.toolRegistry = createRegistry({
+      cmd: (type, data, timeout) => this.cmd(type, data, timeout),
+      semantic: this.semantic,
+      rawApi: (method, path, body) => this.callSelf(method, path, body),
+      // 内核引用供风险门禁读元素文本：门禁不能依赖扩展通道（扩展不可用时门禁会失明）
+      core: this.cdp,
+      // 技能系统：skill 工具按需加载正文（目录与正文分离）
+      skills: require('./agent/skills')
+    });
+    // 后置依赖：子代理委派需要 loop 与模型（loop 又依赖注册表，构成闭环，由 setDeps 解开）
+    this.toolRegistry.setDeps({
+      loop: require('./agent/loop'),
+      registryRef: this.toolRegistry,
+      model: { chat: brain.chat, chatStream: brain.chatStream }
+    });
+    // 自调用令牌: 供工具插件触达任意原生端点(审计/检查/聚合等), 与 CLI 共用同一令牌文件
+    try { this._selfToken = fs.readFileSync(SHARED_TOKEN_FILE, 'utf8').trim(); }
+    catch (e) { this._selfToken = process.env.ARK_TOKEN || ''; }
+    // Agent 任务运行时: Agent 是主体, 浏览器是它的能力 —— 任务可后台执行、并行、取消、回放
+    this.__brain = brain;   // 供 TaskRunner 调用推理循环
+    this.tasks = new TaskRunner(this, { maxConcurrent: +(process.env.ARK_MAX_TASKS || 2) });
+
+    // ============ 能力组装（架构分层）============
+    // 路由不再写在本文件的 switch 里，而是由 capabilities/* 各自声明、此处统一注册。
+    // 传输层（鉴权/CORS/缓存/响应）在 core/http-shell.js，本类只做组合根。
+    this.router = new Router();
+    for (const cap of capabilities) this.router.use(cap);
+    // 工具也纳入同一份清单：/capabilities 因此是"服务能做什么"的唯一出口
+    this.router.setToolSource(() => this.toolRegistry.manifest());
+    this.handleHTTPRequest = createHttpShell(this, this.router, {
+      authToken: this.authToken,
+      authTokenFile: this.authTokenFile,
+      tokenFile: TOKEN_FILE,
+      port: this.port
+    });
 
     this.init();
   }
@@ -101,6 +152,13 @@ class ArkWebServer {
     });
 
     this.wss.on('connection', (ws, req) => {
+      // 来源校验（先于令牌）：挡「任意网页直连 ws://127.0.0.1:9334 操控浏览器」
+      const origin = String((req && req.headers && req.headers.origin) || '');
+      if (!this.isAllowedWsOrigin(origin)) {
+        console.warn(`[ArkWeb] 拒绝来源不明的 WS 连接: Origin=${origin}（网页不允许直连 WS；本机脚本请不带 Origin，扩展请确认来源为 chrome-extension://）`);
+        try { ws.close(4003, 'origin not allowed'); } catch { /* ignore */ }
+        return;
+      }
       // WS 令牌校验(仅当配置了 ARK_TOKEN / ARK_WS_TOKEN): 防止本机任意进程直连 9334 绕过 HTTP 鉴权
       if (this.wsTokenRequired) {
         let provided = null;
@@ -129,24 +187,43 @@ class ArkWebServer {
       ws.on('close', () => {
         this.clients.delete(ws);
         this.connected = this.clients.size > 0;
-        // 插件断开: 立即拒绝所有等待中的请求, 避免挂起 20s
-        for (const { reject, timer } of this.pendingRequests.values()) {
-          clearTimeout(timer);
-          reject(new Error('Chrome 插件已断开连接, 请检查插件状态'));
+        // 插件断开：只拒绝**属于这条连接**的在途请求（旧实现清空全局表，
+        // 另一个浏览器上正在跑的长命令会被误杀并报成"插件已断开"）
+        for (const [rid, entry] of [...this.pendingRequests]) {
+          if (entry.ws !== ws) continue;
+          clearTimeout(entry.timer);
+          entry.reject(new Error('Chrome 插件已断开连接, 请检查插件状态'));
+          this.pendingRequests.delete(rid);
         }
-        this.pendingRequests.clear();
         console.log(`[ArkWeb] 插件已断开, 剩余连接: ${this.clients.size}`);
       });
 
       ws.on('error', (e) => console.error('[ArkWeb] WebSocket 错误:', e.message));
     });
 
-    this.server = http.createServer((req, res) => this.handleHTTPRequest(req, res));
+    this.server = http.createServer((req, res) => {
+      // 前置段（URL 解析、缓存、路由）出错时也必须给响应：
+      // 旧实现没有兜底，畸形请求目标会让 new URL 抛错 → 该请求永久挂起（requestTimeout=0）
+      const p = this.handleHTTPRequest(req, res);
+      if (p && typeof p.catch === 'function') {
+        p.catch((e) => {
+          console.error('[ArkWeb] 请求处理异常:', (e && e.message) || e);
+          try { if (!res.headersSent) { res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ error: 'internal-error', message: String((e && e.message) || e).slice(0, 200) })); } } catch (x) { /* ignore */ }
+        });
+      }
+    });
     // v8.1: keep-alive 与 client 8s 对齐，避免服务端 65s 空挂导致 ECONNRESET
     this.server.keepAliveTimeout = 10000;
     this.server.headersTimeout = 12000;
     this.server.maxHeadersCount = 100;
     this.server.requestTimeout = 0;
+    this.server.on('error', (err) => {
+      if (err && err.code === 'EADDRINUSE') {
+        console.error('[ArkWeb] 启动失败：端口 ' + this.port + ' 已被占用（可能已有一个 Ark 服务在运行）。如需重启请先结束旧进程。');
+        process.exit(1);
+      }
+      console.error('[ArkWeb] HTTP 服务器错误:', (err && err.message) || err);
+    });
     this.server.listen(this.port, this.host, () => {
       console.log(`[ArkWeb] HTTP 服务器: http://${this.host}:${this.port}  (仅回环地址, 局域网不可达)`);
       console.log('');
@@ -156,8 +233,9 @@ class ArkWebServer {
       console.log('  3. 现在可以由 AI 或 curl 调用 API');
       console.log('');
       this.printSecurityBanner();
-      console.log(`[ArkWeb] 端点列表 (${this.listEndpoints().length} 个):`);
+      console.log(`[ArkWeb] 端点列表 (${this.listEndpoints().length} 个, 能力域 ${this.router.stats().capabilities} 个):`);
       this.listEndpoints().forEach(e => console.log(`  ${e}`));
+      this.reportEndpointDrift();
     });
 
     // 心跳(15s): 顺带清理僵死连接(僵尸连接会让后续命令全部超时, 是"服务在线但用不了"的头号原因)
@@ -178,72 +256,42 @@ class ArkWebServer {
     }, 15000);
   }
 
+  /**
+   * 端点清单 —— 由"注册表（权威）+ 说明文档（补充参数）"合成，并双向比对。
+   *
+   * 为什么不是删掉这份说明：说明里有每个端点的参数与用途，路由本身不携带这些信息。
+   * 为什么不再会漂移：此处以注册表为准，逐条比对——
+   *   · 注册了但没有说明 → 标注 [未文档化]
+   *   · 有说明但没有注册 → 标注 [已失效]
+   * 漂移从"静默不一致"变成启动时可见的告警。
+   */
   listEndpoints() {
-    return [
-      'GET  /health (免鉴权)', 'GET  /status', 'GET  /tabs', 'GET  /full', 'GET  /clear-cache',
-      'POST /batch {steps:[{type,data}]}',
-      'GET  /session', 'POST /session/create', 'POST /session/delete {sessionId, closeTabs?}',
-      'POST /session/assign {sessionId,tabId}', 'POST /session/release {sessionId,tabId?}',
-      'POST /session/tab {sessionId,url, active?}',
-      'POST /open {url, current?}', 'POST /navigate {url}', 'POST /reload', 'POST /back', 'POST /forward',
-      'POST /tab/activate {tabId}', 'POST /tab/close {tabId}',
-      'GET  /page-info', 'GET  /dom', 'GET  /html', 'GET  /frames', 'GET  /layout',
-      'POST /query {selector}',
-      'POST /query-all {selector}', 'POST /query-many {selectors}',
-      'POST /exists {selector}', 'POST /text {selector}',
-      'POST /attr {selector,name}', 'POST /value {selector}',
-      'POST /get-text {selector}', 'POST /get-attr {selector,name}', 'POST /get-value {selector} (插件命令名别名)',
-      'POST /click {selector}', 'POST /hover {selector}', 'POST /dblclick {selector}',
-      'POST /rightclick {selector}', 'POST /drag {selector,targetSelector|dx,dy}',
-      'POST /mouse {type,x,y}', 'POST /scroll {x,y}', 'POST /scroll-by {x,y}', 'POST /scroll-into-view {selector}',
-      'POST /key {key,modifiers}', 'POST /type {selector?,text,mode}',
-      'POST /fill {fields:[{selector,value}]}',
-      'POST /select {selector,value|text}', 'POST /check {selector,checked}',
-      'POST /clear {selector}', 'POST /focus {selector}',
-      'POST /evaluate {code,timeout}', 'POST /wait-for {selector,timeout,state}',
-      'POST /wait-for-text {text}', 'POST /wait-for-url {pattern}', 'POST /wait-for-load',
-      'GET  /screenshot?format=&quality=', 'GET  /screenshot/full',
-      'POST /screenshot/element {selector}',
-      'GET  /snapshot?format=&annotate=&full=&compact=&maxElements=&selector=&fast=', 'POST /snapshot {format,annotate,full,compact,maxElements,selector,fast}',
-      'GET  /snapshot/binary?format=&annotate=&full=&compact=&selector=&fast=',
-      'POST /snapshot/zoom {ref|selector|x,y,width,height,scale,format,quality} (裁剪放大读小字)',
-      'POST /snapshot/text {minLen,max} (可见文本块+紧致坐标, 免截图读页面)',
-      'POST /wait-for-stable {timeout,quiet} (等 DOM 稳定, 替代固定 sleep)',
-      'POST /reload-extension (重载插件代码; 重载后需重新「启用调试」)',
-      'POST /fast/act {action,selector,text,fields,url,fast}', 'POST /act {action,...}',
-      'GET  /fast/snapshot', 'POST /fast/click {selector,text,fast}', 'POST /fast/fill {fields}',
-      'GET  /html', 'POST /html {selector}',
-      'GET  /pdf?format=', 'POST /pdf {format,landscape,printBackground,margin}', 'POST /upload {selector,files}',
-      'POST /highlight {selector,color}', 'POST /highlight/clear',
-      'POST /dialog {accept,promptText,auto}', 'GET  /dialogs',
-      'POST /auto-dark {enabled}',
-      'POST /js {disabled}', 'POST /hardware-concurrency {count}',
-      'GET  /cookies', 'POST /cookie {name,value,...}', 'POST /cookie/remove {name}',
-      'GET  /storage?type=local|session', 'POST /storage {type,key,value}',
-      'POST /storage/remove {type,key}', 'POST /storage/clear {type}',
-      'GET  /network?filter=&limit=', 'POST /network/clear',
-      'POST /network/response {urlPattern}',
-      'POST /network/block {patterns}', 'POST /network/unblock',
-      'POST /network/conditions {offline,latency,download,upload}',
-      'POST /network/conditions/reset',
-      'POST /network/disable-cache {disabled}', 'POST /bypass-csp {enabled}',
-      'GET  /performance', 'GET  /vitals', 'GET  /resources',
-      'POST /cpu {rate}',
-      'POST /device {device|width,height,...}', 'POST /device/clear',
-      'POST /reset-all (一键恢复全部模拟/策略影响: 设备/媒体/geo/时区/语言/CPU/JS/并发/网络/CSP/缓存/暗色/高亮/弹窗策略/滚动)',
-      'POST /media {features}', 'POST /geo {latitude,longitude}',
-      'POST /locale {locale}', 'POST /timezone {timezoneId}',
-      'GET  /security', 'GET  /a11y', 'GET  /seo',
-      'GET  /console?limit=', 'POST /console/clear',
-      'GET  /dom-changes', 'POST /dom-changes/clear',
-      'GET  /analyze-all', 'POST /monitor {interval,duration}',
-      'POST /monitor/stop', 'GET  /monitor/status',
-      'POST /debug/attach-all', 'POST /debug/detach-all', 'GET  /debug/info', 'GET  /debug/cdp-status',
-      'POST /audit {url?,budget?,format?,save?}', 'GET  /history?url=&limit=',
-      'POST /audit/run {urls,budget}', 'GET  /audit/status/<id>',
-      '通用: 所有端点支持 ?tabId=<id> 指定标签页',
-      '通用: 所有端点支持 ?session=<id> 会话隔离(只能操作本会话绑定的标签页)'
-    ];
+    const docs = new Map();
+    for (const s of ENDPOINT_DOCS) {
+      const m = /^([A-Z]+)\s+(\/\S+?)(?:\s|\?|$)/.exec(s);
+      if (!m) continue;
+      // 说明里用 <id> 写占位符，路由用 :id —— 归一化后再比对，避免把写法差异误报为漂移
+      docs.set(m[2].replace(/<([^>]+)>/g, ':$1'), s);
+    }
+    const registered = this.router.routes();
+    const seen = new Set();
+    const out = [];
+    for (const r of registered) {
+      seen.add(r.path);
+      out.push(docs.get(r.path) || `ANY  ${r.path}   [未文档化 · 能力: ${r.cap}]`);
+    }
+    this.endpointDrift = {
+      undocumented: registered.filter(r => !docs.has(r.path)).map(r => r.path),
+      stale: [...docs.keys()].filter(p => !seen.has(p))
+    };
+    return out;
+  }
+
+  /** 启动时打印漂移告警（有漂移才说话，避免噪音） */
+  reportEndpointDrift() {
+    const d = this.endpointDrift || { undocumented: [], stale: [] };
+    if (d.undocumented.length) console.log(`[ArkWeb] 注意: ${d.undocumented.length} 个端点缺少说明 → ${d.undocumented.join(', ')}`);
+    if (d.stale.length) console.log(`[ArkWeb] 注意: ${d.stale.length} 条说明已失效(无对应路由) → ${d.stale.join(', ')}`);
   }
 
   // ============ 插件消息 ============
@@ -252,25 +300,53 @@ class ArkWebServer {
     const { type, data, id } = message;
 
     switch (type) {
-      case 'register':
+      case 'register': {
         console.log('[ArkWeb] 插件注册:', JSON.stringify(data));
-        // 记录注册信息, 供多实例时选择最新版本; 同时暴露给 /status 便于排查"插件是否为新版代码"
-        for (const [ws, info] of this.clients) {
-          if (ws.readyState === WebSocket.OPEN) {
-            info.version = data?.version || info.version;
-            info.browser = data?.browser || info.browser;
-            info.registeredAt = data?.timestamp || info.registeredAt;
-            // 单独记一份最近注册信息: /status 用它判断"浏览器里跑的是哪版插件代码"
-            this.lastRegistration = { version: info.version, browser: info.browser || null, registeredAt: info.registeredAt || null };
+        // 只更新「本条消息来源连接」自身的信息。
+        // 注意：早期实现遍历所有连接写入，导致每个连接的 version 被覆盖成"最后注册的插件版本"，
+        // 多浏览器共存时版本排序全部平局 → 命令总是发给最早注册的连接，无法按版本定向。
+        const regInfo = this.clients.get(ws);
+        if (regInfo) {
+          regInfo.version = data?.version || regInfo.version;
+          regInfo.browser = data?.browser || regInfo.browser;
+          regInfo.extId = data?.extId || regInfo.extId;
+          // 连接名的优先级：扩展自己给的 > (ID,内核) 查表 > 内核名
+          regInfo.label = data?.label || this.browserLabelOf(regInfo.extId, regInfo.browser) || regInfo.label || regInfo.browser;
+          regInfo.registeredAt = data?.timestamp || regInfo.registeredAt;
+          // 代码指纹：磁盘上的 extension/background.js 与浏览器里实际运行的是否一致
+          if (data?.build) {
+            const want = this.expectedBuildHash();
+            regInfo.build = data.build;
+            regInfo.stale = !!(want && data.build !== want);
+            if (regInfo.stale && !this._staleWarned) {
+              this._staleWarned = true;
+              console.warn('[ArkWeb] 注意: 浏览器里运行的扩展代码与磁盘不一致（插件 ' + data.build + ' vs 磁盘 ' + want + '）——'
+                + '常见原因是 --load-extension 启动方式下服务工作线程脚本被缓存。'
+                + '处理: 关闭该浏览器后删除其 profile 下的 "Service Worker" 目录再启动，或在扩展管理页重载该扩展。');
+            }
           }
         }
+        // 单独记一份最近注册信息: /status 用它判断"浏览器里跑的是哪版插件代码"
+        this.lastRegistration = {
+          version: data?.version || null,
+          browser: data?.browser || null,
+          label: regInfo?.label || data?.label || null,
+          extId: data?.extId || null,
+          registeredAt: data?.timestamp || null
+        };
         break;
+      }
 
       case 'response':
         if (id && this.pendingRequests.has(id)) {
-          const { resolve, timer } = this.pendingRequests.get(id);
-          clearTimeout(timer);
-          resolve(data);
+          const entry = this.pendingRequests.get(id);
+          // 归属校验：只接受"发出这条请求的那个连接"的应答，避免多浏览器下串答/伪造
+          if (entry.ws && entry.ws !== ws) {
+            console.warn('[ArkWeb] 忽略来自其他连接的应答 id=' + id);
+            break;
+          }
+          clearTimeout(entry.timer);
+          entry.resolve(data);
           this.pendingRequests.delete(id);
         }
         break;
@@ -317,21 +393,97 @@ class ArkWebServer {
     }
   }
 
+  /** 扩展 ID → 浏览器连接名 的映射（由 scripts/label-browsers.js 生成，5 秒缓存）
+   *
+   *  为什么要这张表：多浏览器共存时得知道"哪个连接是谁"。UA 认不出 BrowserOS（与 Chrome 同串），
+   *  在扩展里运行时探测又受服务线程启动时序影响。而扩展 ID 对同一份解压目录是确定的，
+   *  于是改为"扩展上报 ID、服务端查表"，稳定且可离线生成。 */
+  browserLabelOf(extId, kernel) {
+    if (!extId) return null;
+    const now = Date.now();
+    if (!this._labelMap || now - (this._labelMapAt || 0) > 5000) {
+      try {
+        this._labelMap = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.ark-web', 'browser-labels.json'), 'utf8'));
+      } catch (e) { this._labelMap = {}; }
+      this._labelMapAt = now;
+    }
+    // 复合键优先（区分"同一份目录被两个浏览器加载"），退化到只用 ID
+    return this._labelMap[String(extId) + '|' + String(kernel || '')] || this._labelMap[String(extId)] || null;
+  }
+
+  /** 磁盘上 extension/background.js 的指纹前 8 位（按 mtime 缓存），与插件上报的 build 比对 */
+  expectedBuildHash() {
+    try {
+      const f = path.join(__dirname, '..', 'extension', 'background.js');
+      const st = fs.statSync(f);
+      if (this._buildHash && this._buildHash.mtimeMs === st.mtimeMs) return this._buildHash.hash;
+      const h = crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex').slice(0, 8);
+      this._buildHash = { mtimeMs: st.mtimeMs, hash: h };
+      return h;
+    } catch (e) { return null; }
+  }
+
+  /** 心跳间隔是 15s，"静默超过 45s"即可视为该连接已死（浏览器被关掉时 socket 未必立刻收到 close）。
+   *
+   *  为什么需要它：浏览器进程被强杀/崩溃后，WS 可能保持 OPEN 一段时间 —— 期间
+   *  /status 会报"已连接"、面板自检会说"一切正常"，而命令全部超时。健康状态必须
+   *  按"最近有没有真的说过话"算，不能只看 socket 存在。 */
+  liveClients(maxIdleMs) {
+    const max = maxIdleMs || 45000;
+    const now = Date.now();
+    return [...this.clients.values()].filter((i) => now - (i.lastSeen || i.connectedAt || 0) < max);
+  }
+
   /** 向插件发送命令。
-   *  多连接时: 优先健康连接(跳过近期超时的可疑连接), 其次版本高者。
-   *  超时后自动换下一个连接重试一次 —— 僵尸连接(插件重载/浏览器休眠后残留的旧实例)
-   *  表现为 readyState=OPEN 但永不回消息, 会让所有命令静默超时(即"服务显示已连接但用不了")。 */
-  sendToPlugin(message, timeout = 20000) {
+   *
+   *  多浏览器同时连接时的挑选顺序（历史教训：曾用版本号高低当唯一信号，于是有人把某个
+   *  副本的版本人为抬到 2.9.4 只为了让命令优先发给它 —— 用版本号表达路由意图是错的）：
+   *    1) 明确指定（?browser= / X-Ark-Browser 头 / opt.prefer）—— 指定了就必须匹配，否则报错
+   *    2) 环境默认偏好 ARK_PREFER_BROWSER（按连接标签或内核名做子串匹配）
+   *    3) 健康连接优先（跳过近期超时的可疑连接）
+   *    4) 最近有活动者优先（用户真正在用的那个浏览器）
+   *    5) 版本号只作为最后的平局裁决
+   */
+  sendToPlugin(message, timeout = 20000, opt) {
     return new Promise((resolve, reject) => {
       const now = Date.now();
       const cmpVer = (a, b) => String(a || '0').replace(/-.*$/, '')
         .localeCompare(String(b || '0').replace(/-.*$/, ''), undefined, { numeric: true });
-      const candidates = [...this.clients.entries()]
-        .filter(([ws]) => ws.readyState === WebSocket.OPEN)
+      const ctx = this.als ? (this.als.getStore() || {}) : {};
+      const prefer = (opt && opt.prefer) || ctx.browser || process.env.ARK_PREFER_BROWSER || '';
+      const matches = (info) => {
+        if (!prefer) return true;
+        const p = String(prefer).toLowerCase();
+        return String(info.label || '').toLowerCase().includes(p) || String(info.browser || '').toLowerCase().includes(p);
+      };
+      const all = [...this.clients.entries()].filter(([ws]) => ws.readyState === WebSocket.OPEN);
+      let pool = all;
+      if (prefer) {
+        const hit = all.filter(([, info]) => matches(info));
+        if (!hit.length) {
+          const avail = all.map(([, i]) => (i.label || i.browser || '未知') + '(v' + (i.version || '?') + ')').join(', ');
+          reject(new Error(`指定的浏览器 "${prefer}" 未连接。当前连接: ${avail || '无'}。检查该浏览器的 Ark 插件是否已加载并连接，或用 ?browser= 指定其中一个。`));
+          return;
+        }
+        pool = hit;
+      }
+      const candidates = pool
         .sort((a, b) => {
+          // 0) 死连接排最后：静默超过心跳周期的连接（浏览器已退出但 socket 还在）不该被优先尝试
+          const da = now - (a[1].lastSeen || 0) > 45000 ? 1 : 0;
+          const db = now - (b[1].lastSeen || 0) > 45000 ? 1 : 0;
+          if (da !== db) return da - db;
+          // 1) 默认倾向产品浏览器：两个浏览器都连着时，命令默认发给 BrowserOS，
+          //    否则"发给谁"取决于谁刚发过心跳，行为不可预期（实测踩过：面板验证时命令偶发落到夸克）。
+          //    显式 ?browser= / ARK_PREFER_BROWSER 永远优先于这个默认值（上面已过滤）。
+          const pa = String(a[1].label || '').toLowerCase() === 'browseros' ? 0 : 1;
+          const pb = String(b[1].label || '').toLowerCase() === 'browseros' ? 0 : 1;
+          if (pa !== pb) return pa - pb;
           const sa = now < (a[1].suspectUntil || 0) ? 0 : 1;   // 近期超时的连接排到最后
           const sb = now < (b[1].suspectUntil || 0) ? 0 : 1;
           if (sa !== sb) return sb - sa;
+          const la = a[1].lastSeen || 0, lb = b[1].lastSeen || 0;
+          if (la !== lb) return lb - la;                        // 最近有活动者优先
           return cmpVer(b[1].version, a[1].version);
         })
         .map(([ws]) => ws);
@@ -356,9 +508,15 @@ class ArkWebServer {
       this.pendingRequests.delete(id);
       const info = this.clients.get(ws);
       if (info) { info.timeouts = (info.timeouts || 0) + 1; info.suspectUntil = Date.now() + 30000; }
-      if (idx + 1 < candidates.length) {
+      // 写类命令（点击/输入/导航/批量）**不跨连接重试**：同一份命令在另一个浏览器上再执行一次
+      // 会产生不可撤销的副作用（点一次提交两次）。只读命令才允许换连接重试。
+      const nonIdempotent = this.writeTypes.has(message.type) || message.type === 'batch';
+      if (idx + 1 < candidates.length && !nonIdempotent) {
         console.warn(`[ArkWeb] 连接 #${idx + 1} 对 ${message.type} 无响应(${currentTimeout}ms), 自动换下一个连接重试(活跃连接 ${this.clients.size} 个)`);
         return this._sendAttempt(candidates, idx + 1, message, timeout, timeout, resolve, reject);
+      }
+      if (nonIdempotent && idx + 1 < candidates.length) {
+        console.warn(`[ArkWeb] 写类命令 ${message.type} 超时，为避免重复副作用不换连接重试`);
       }
       const e = new Error(`插件命令超时(${timeout}ms): ${message.type} — 可能原因: ①页面有模态弹窗挂起(手动模式) ②页面渲染忙/冻结 ③CDP 授权过期 ④浏览器后台休眠(可 POST /tab/activate 激活标签页, 或在插件 popup 重新连接)`);
       e.code = 'PLUGIN_TIMEOUT';
@@ -366,6 +524,7 @@ class ArkWebServer {
       reject(e);
     }, currentTimeout);
     this.pendingRequests.set(id, {
+      ws: ws,   // 归属：断开/应答校验用（旧实现全局一张表，任一插件断开就误杀别人的在途请求）
       resolve: (d) => {
         if (settled) return;
         settled = true;
@@ -395,7 +554,13 @@ class ArkWebServer {
     const prev = this.tabQueues.get(key) || Promise.resolve();
     const cur = prev.then(() => fn());
     // 链不断裂, 错误不污染后续
-    this.tabQueues.set(key, cur.catch(() => {}));
+    const tail = cur.catch(() => {});
+    this.tabQueues.set(key, tail);
+    // 队列尾结束后把自己摘掉：旧实现只写不删，tabQueues 无界增长（tab id 单调递增），
+    // 而且 hasPending 因此恒真 —— 注释承诺的"快照缓存 400ms 快速路径"再也不触发。
+    tail.then(() => {
+      if (this.tabQueues.get(key) === tail) this.tabQueues.delete(key);
+    });
     return cur;
   }
   _inflightKey(type, tabId, data) {
@@ -404,6 +569,53 @@ class ArkWebServer {
     if (!ro.has(type)) return null;
     try { return `${type}:${tabId ?? 'global'}:${JSON.stringify(data||{})}`; } catch { return null; }
   }
+  /** 与具体标签页无关的命令：多标签会话下也不该被"必须显式指定 tabId"拦住。
+   *  外壳（http-shell 的 globalOk）早已把它们当全局命令放行，而 cmd() 这里一律抛错 ——
+   *  两层判定矛盾导致 /tabs?session=X 直接 500、/monitor 显示"已启动"却永远没有数据点。 */
+  static get SESSION_GLOBAL_TYPES() {
+    return new Set(['get-tabs', 'get-browser-info', 'get-cdp-status', 'audit-collect', 'open-url', 'clear-cache', 'batch']);
+  }
+
+  /** 请求级 tabId（语义层索引按标签页隔离；返回 null 表示"活动标签页"） */
+  _reqTabId() {
+    const ctx = this.als.getStore() || {};
+    return ctx.tabId != null ? ctx.tabId : null;
+  }
+
+  /** 请求级 CDP targetId（由任务运行时/任务端点注入；精确锁定目标页，不依赖扩展通道） */
+  _reqTargetId() {
+    const ctx = this.als.getStore() || {};
+    return ctx.targetId != null ? ctx.targetId : null;
+  }
+
+  /**
+   * 内部自调用：把请求转发给本机的端点处理逻辑（自动带上令牌与当前 tabId / session）。
+   * 用途：工具插件用它触达任意原生端点（审计 / 检查 / 聚合 / 模拟 …），
+   *       从而无需为 120+ 个端点各写一个专用工具。
+   */
+  async callSelf(method, path, body) {
+    const ctx = this.als.getStore() || {};
+    let p = String(path || '');
+    if (ctx.tabId != null && p.indexOf('tabId=') < 0) {
+      p += (p.indexOf('?') >= 0 ? '&' : '?') + 'tabId=' + encodeURIComponent(String(ctx.tabId));
+    }
+    if (ctx.sessionId != null && p.indexOf('session=') < 0) {
+      p += (p.indexOf('?') >= 0 ? '&' : '?') + 'session=' + encodeURIComponent(String(ctx.sessionId));
+    }
+    const opts = { method: method, headers: { 'Content-Type': 'application/json' } };
+    if (this._selfToken) opts.headers['X-Ark-Token'] = this._selfToken;
+    if (method === 'POST') opts.body = JSON.stringify(body || {});
+    let res;
+    try {
+      res = await fetch('http://127.0.0.1:' + this.port + p, Object.assign(opts, { signal: AbortSignal.timeout(60000) }));
+    } catch (e) {
+      return { error: 'self-call-failed', path: p, message: String((e && e.message) || e) };
+    }
+    const text = await res.text();
+    if (res.status === 401) return { error: 'self-call-unauthorized', path: p, hint: '令牌缺失或不匹配' };
+    try { return JSON.parse(text); } catch (e) { return { status: res.status, raw: String(text).slice(0, 3000) }; }
+  }
+
   _snapshotKey(tabId, data) {
     const ctx = this.als.getStore() || {};
     const tid = tabId != null ? tabId : (ctx.tabId != null ? ctx.tabId : (ctx.sessionId != null ? this.resolveCacheTab() : 'active'));
@@ -443,7 +655,9 @@ class ArkWebServer {
           throw e;
         }
       } else {
-        const e = new Error(`session ${ctx.sessionId} 绑定 ${sess.tabIds.size} 个标签页, 必须显式指定 ?tabId=`);
+        // 全局命令（列表/状态/批量等与具体标签页无关）直接放行，避免与外壳的 globalOk 判定自相矛盾
+      if (BridgeServer.SESSION_GLOBAL_TYPES.has(type)) return this.sendToPlugin({ type, data }, timeout);
+      const e = new Error(`session ${ctx.sessionId} 绑定 ${sess.tabIds.size} 个标签页, 必须显式指定 ?tabId=`);
         e.statusCode = 400;
         throw e;
       }
@@ -544,1034 +758,11 @@ class ArkWebServer {
 
   // ============ HTTP 处理 ============
 
-  async handleHTTPRequest(req, res) {
-    this.requestCount++;
-    const t0 = Date.now();
-
-    // ---- 第 1 道: Host 校验(挡 DNS rebinding: 恶意域名解析到 127.0.0.1 后带自己的 Host 发请求) ----
-    const hostOk = this.isLoopbackHost(req.headers.host);
-    const origin = req.headers.origin || null;
-    const originOk = this.isAllowedOrigin(origin);
-
-    // ---- 第 2 道: CORS 头按来源精确回显, 不再使用通配 '*' ----
-    if (origin && originOk) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Ark-Token, X-Session, Authorization');
-      res.setHeader('Access-Control-Max-Age', '600');
-    }
-
-    if (!hostOk || !originOk) {
-      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
-        error: `403: 请求被安全策略拒绝(${!hostOk ? `Host=${req.headers.host} 非回环地址` : `Origin=${origin} 不被信任`})`,
-        hint: '仅允许 127.0.0.1/localhost 的 Host, 且来源须为本机页面或浏览器扩展页面'
-      }));
-      return;
-    }
-
-    // 预检请求不携带自定义头, 必须在令牌校验前放行(已按来源回显 CORS 头)
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
-
-    const url = new URL(req.url, `http://localhost:${this.port}`);
-    const pathname = url.pathname;
-
-    // ---- 第 3 道: 令牌校验(挡本机其他进程 / 任意网页的 CSRF) ----
-    // 例外: /health 为免鉴权存活探针, 只回极简状态, 不含任何敏感数据
-    if (this.authToken && pathname !== '/health') {
-      const provided = this.requestToken(req, url);
-      if (!this.tokenEquals(provided, this.authToken)) {
-        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({
-          error: '401: 缺少或错误的访问令牌',
-          hint: `在请求头带上 X-Ark-Token(或 ?token=)。令牌见 ${this.authTokenFile || TOKEN_FILE}, server 启动日志也会打印。CLI 会自动读取并携带。`,
-          tokenFile: this.authTokenFile || TOKEN_FILE
-        }));
-        console.log(`[ArkWeb] ${req.method} ${pathname} -> 401 (令牌校验失败)`);
-        return;
-      }
-    }
-
-    // 全局 tabId 参数: 所有端点支持 ?tabId=<id>
-    // 请求级隔离(ALS): 并发请求的 ?tabId 互不覆盖, 修复此前的实例字段竞态
-    const tabId = url.searchParams.get('tabId') ? +url.searchParams.get('tabId') : null;
-    // 缓存 TTL 覆盖: ?ttl=<ms>(0=禁用缓存, 默认端点 TTL 见 cacheTtl)
-    const ttlParam = url.searchParams.get('ttl');
-    const ttl = ttlParam !== null ? +ttlParam : null;
-    // 会话参数: ?session=<id> 或 X-Session 头; 会话内请求只能操作本会话绑定的标签页
-    const sessionId = url.searchParams.get('session') || req.headers['x-session'] || null;
-    const fresh = url.searchParams.get('fresh') === '1';
-    return this.als.run({ tabId, sessionId, ttl: Number.isFinite(ttl) ? ttl : null, fresh }, async () => {
-
-    const send = (status, obj) => {
-      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(obj)); // 紧凑输出
-      if (status >= 400) {
-        console.log(`[ArkWeb] ${req.method} ${pathname} -> ${status} (${Date.now() - t0}ms)`);
-      }
-    };
-
-    // 会话预校验: 必须在只读缓存命中之前执行 —— 否则越权请求可借缓存直接返回目标 tab 数据绕过 403
-    // 管理端点(/session*)自身不受此限制
-    if (sessionId != null && !pathname.startsWith('/session')) {
-      const sess = this.sessions.get(String(sessionId));
-      if (!sess) return send(404, { error: `session 不存在: ${sessionId}(请先 POST /session/create)` });
-      if (tabId != null && !sess.tabIds.has(tabId)) {
-        return send(403, { error: `403: session ${sessionId} 未绑定标签页 ${tabId}(POST /session/assign 可绑定)` });
-      }
-      // 多标签页会话 + 未指定 tabId 的歧义请求: 直接 400(避免只读缓存短路 cmd() 的约束校验)
-      // 全局端点(/tabs /network /analyze-all /monitor* /status /history /audit*)与 /open(建 tab 入口)豁免
-      const globalOk = pathname === '/tabs' || pathname === '/network' || pathname === '/analyze-all'
-        || pathname.startsWith('/monitor') || pathname === '/status' || pathname === '/clear-cache'
-        || pathname === '/history' || pathname.startsWith('/audit/') || pathname === '/open';
-      if (tabId == null && !globalOk && sess.tabIds.size > 1) {
-        return send(400, { error: `session ${sessionId} 绑定 ${sess.tabIds.size} 个标签页, 必须显式指定 ?tabId=` });
-      }
-    }
-
-    // 只读端点缓存
-    const cached = this.getCachedResponse(pathname, fresh);
-    if (cached !== null) return send(200, cached);
-
-    // 审计任务状态查询: GET /audit/status/<id>
-    if (pathname.startsWith('/audit/status/')) {
-      const id = decodeURIComponent(pathname.split('/').pop());
-      return send(200, this.auditQueue.getStatus(id));
-    }
-
-    try {
-      let result;
-      switch (pathname) {
-        // ============ 基础 ============
-        case '/health':
-          // 免鉴权存活探针 + 自解释用法(便于新接入的 AI 立刻知道该用什么命令、令牌在哪)
-          // 注意: 不含版本/tab/页面等实质数据; 服务仅监听回环地址, 因此返回本机路径是可接受的
-          result = {
-            ok: true,
-            connected: this.connected,
-            cli: path.join(__dirname, '..', 'client', 'browser-client.js'),
-            tokenFile: this.authTokenFile || TOKEN_FILE,
-            tokenHeader: 'X-Ark-Token',
-            usage: {
-              preferred: `node "${path.join(__dirname, '..', 'client', 'browser-client.js')}" status   (CLI 会自动读取令牌, 推荐)`,
-              http: 'HTTP 调用需带 X-Ark-Token 头; 令牌内容见 tokenFile(Windows PowerShell: Get-Content $env:USERPROFILE\\.ark-web\\token -Raw)',
-              firstChecks: ['/health(免鉴权)', '/status(需令牌)', '/tabs'],
-              docs: 'SKILL.md(视觉优先工作流) · references/protocol.md(全端点) · references/troubleshooting.md(排障)'
-            }
-          };
-          break;
-
-        case '/status':
-          result = {
-            connected: this.connected,
-            pluginConnected: this.connected,
-            clients: this.clients.size,
-            // 连接健康: 有多个连接且其中存在近期超时的"可疑连接"时, 说明可能是僵尸连接残留
-            connections: [...this.clients.values()].map(i => ({
-              version: i.version || null,
-              browser: i.browser || null,
-              idleMs: Date.now() - (i.lastSeen || i.connectedAt || Date.now()),
-              suspect: Date.now() < (i.suspectUntil || 0),
-              timeouts: i.timeouts || 0
-            })),
-            ...(this.clients.size > 1 ? { connectionNote: `存在 ${this.clients.size} 个插件连接(通常 1 个); 多余的可能是插件重载后的僵尸连接, 命令超时会自动换连接重试, 120s 静默后自动清理` } : {}),
-            networkLogs: this.networkLogs.length,
-            consoleLogs: this.consoleLogs.length,
-            requests: this.requestCount,
-            uptime: Math.round((Date.now() - this.startedAt) / 1000),
-            version: 3,
-            serverVersion: require('./package.json').version,
-            // 插件侧版本: 与 manifest.json 对比即可判断"浏览器是否加载了最新代码"
-            plugin: this.lastRegistration || null,
-            security: {
-              host: this.host,
-              loopbackOnly: true,
-              tokenAuth: this.authToken ? true : false,
-              tokenSource: this.authSource,
-              tokenFile: this.authTokenFile,
-              wsTokenRequired: this.wsTokenRequired
-            }
-          };
-          break;
-
-        case '/clear-cache':
-          this.clearCache();
-          result = { success: true, message: 'Cache cleared' };
-          break;
-
-        case '/tabs': {
-          result = await this.cmd('get-tabs');
-          // 会话视角: 标注 owned, 并清理已关闭标签页的绑定
-          if (sessionId != null) {
-            const sess = this.sessions.get(String(sessionId));
-            if (sess && Array.isArray(result)) {
-              const alive = new Set(result.map(t => t.id));
-              for (const id of [...sess.tabIds]) if (!alive.has(id)) sess.tabIds.delete(id);
-              for (const t of result) t.owned = sess.tabIds.has(t.id);
-            }
-          }
-          break;
-        }
-
-        // ============ 会话(多 agent 并行隔离) ============
-        case '/session':
-          result = {
-            active: sessionId,
-            sessions: [...this.sessions.entries()].map(([id, s]) => ({ id, tabIds: [...s.tabIds], createdAt: s.createdAt }))
-          };
-          break;
-
-        case '/session/create': {
-          const id = `s${this.nextSessionId++}-${Date.now().toString(36)}`;
-          this.sessions.set(id, { id, tabIds: new Set(), createdAt: Date.now() });
-          result = { success: true, sessionId: id, createdAt: Date.now() };
-          break;
-        }
-
-        case '/session/delete': {
-          const b = await this.readBody(req);
-          const sid = String(b.sessionId || '');
-          const sess = this.sessions.get(sid);
-          if (!sess) { result = { error: `session 不存在: ${sid}` }; break; }
-          const closedTabs = [];
-          // 可选 closeTabs: 删除会话时同时关闭其标签页(并自动恢复该 tab 的全部模拟)
-          // 安全: 永远保留浏览器 ≥1 个标签页(全部关闭会连带关闭窗口 → No current window)
-          if (b.closeTabs === true && sess.tabIds.size) {
-            const tabs = await this.cmd('get-tabs').catch(() => []);
-            const alive = new Set((Array.isArray(tabs) ? tabs : []).map(t => t.id));
-            for (const id of sess.tabIds) {
-              if (alive.has(id)) {
-                await this.cmd('close-tab', { tabId: id }).catch(() => {});
-                closedTabs.push(id);
-              }
-            }
-            // 若窗口只剩被关闭的标签页, 保留最后一个不关(防整窗关闭)
-            const remaining = (await this.cmd('get-tabs').catch(() => [])).length;
-            if (remaining === 0 && closedTabs.length) {
-              const lastId = closedTabs.pop();
-              await this.cmd('open-url', { url: 'about:blank', active: false }).catch(() => {});
-            }
-          }
-          this.sessions.delete(sid);
-          result = { success: true, sessionId: sid, closedTabs, hint: '标签页已关闭, 其模拟状态已随标签页销毁自动清除' };
-          break;
-        }
-
-        case '/session/assign': {
-          const b = await this.readBody(req);
-          const sid = String(b.sessionId || '');
-          const sess = this.sessions.get(sid);
-          if (!sess) { result = { error: `session 不存在: ${sid}` }; break; }
-          if (b.tabId == null) { result = { error: 'tabId is required' }; break; }
-          sess.tabIds.add(+b.tabId);
-          result = { success: true, sessionId: sid, tabId: +b.tabId, tabIds: [...sess.tabIds] };
-          break;
-        }
-
-        case '/session/release': {
-          const b = await this.readBody(req);
-          const sid = String(b.sessionId || '');
-          const sess = this.sessions.get(sid);
-          if (!sess) { result = { error: `session 不存在: ${sid}` }; break; }
-          if (b.tabId != null) sess.tabIds.delete(+b.tabId);
-          else this.sessions.delete(sid);
-          result = { success: true, sessionId: sid, tabIds: sess.tabIds.size ? [...sess.tabIds] : [] };
-          break;
-        }
-
-        case '/session/tab': {
-          // 会话专用开标签页: 新 tab 自动归属会话(不归属则后续命令 403)
-          // 默认后台打开(active:false)不抢占用户焦点; 需要操作时才显式 active:true 或 /tab/activate
-          const b = await this.readBody(req);
-          const sid = String(b.sessionId || '');
-          const sess = this.sessions.get(sid);
-          if (!sess) { result = { error: `session 不存在: ${sid}` }; break; }
-          if (!b.url) { result = { error: 'url is required' }; break; }
-          const r = await this.cmd('open-url', { url: b.url, active: b.active === true });
-          if (r?.tab?.id != null) {
-            sess.tabIds.add(r.tab.id);
-            r.sessionId = sid;
-            r.hint = '标签页后台打开(不抢焦点); 需要交互时 POST /tab/activate 或重开 active:true';
-          }
-          result = r;
-          break;
-        }
-
-        // ============ 批量(一次 WS 往返) ============
-        case '/batch': {
-          const body = await this.readBody(req);
-          const steps = Array.isArray(body) ? body : body.steps;
-          // 可选 timeout 字段: 整批总超时(默认 60s，自动按步超时总和扩展，避免整批504吞没已完成步骤)
-          let batchTimeout = typeof body?.timeout === 'number' ? body.timeout : 60000;
-          if (Array.isArray(steps)) {
-            const sum = steps.reduce((a, s) => a + (typeof s.data?.timeout === 'number' ? s.data.timeout : 8000), 0);
-            batchTimeout = Math.max(batchTimeout, Math.min(sum + 5000, 120000));
-          }
-          // 把请求级 tabId/session 约束注入每个 step: 否则 step 内无 tabId 时会 fallback 到
-          // 插件侧"当前激活标签页", 多 agent 并行下产生竞态漂移
-          if (Array.isArray(steps)) {
-            const ctx2 = this.als.getStore() || {};
-            let fallback = ctx2.tabId != null ? ctx2.tabId : null;
-            if (ctx2.sessionId != null) {
-              const sess2 = this.sessions.get(String(ctx2.sessionId));
-              if (!sess2) {
-                const e2 = new Error(`session 不存在: ${ctx2.sessionId}(请先 POST /session/create)`);
-                e2.statusCode = 404;
-                throw e2;
-              }
-              for (const s of steps) {
-                const d = s.data || (s.data = {});
-                if (d.tabId != null && !sess2.tabIds.has(d.tabId)) {
-                  const e2 = new Error(`403: session ${ctx2.sessionId} 未绑定标签页 ${d.tabId}`);
-                  e2.statusCode = 403;
-                  throw e2;
-                }
-                if (d.tabId == null) {
-                  if (sess2.tabIds.size === 1) {
-                    d.tabId = [...sess2.tabIds][0];
-                  } else if (sess2.tabIds.size === 0) {
-                    // 新建标签页命令(open-url 非 current)允许空会话执行, 归属由 /open、/session/tab 处理
-                    const isOpenNew = s.type === 'open-url' && d.current !== true;
-                    if (!isOpenNew) {
-                      const e2 = new Error(`session ${ctx2.sessionId} 尚未绑定任何标签页(POST /session/tab 或 /session/assign)`);
-                      e2.statusCode = 400;
-                      throw e2;
-                    }
-                  } else {
-                    const e2 = new Error(`session ${ctx2.sessionId} 绑定 ${sess2.tabIds.size} 个标签页, batch 步骤必须显式指定 ?tabId=`);
-                    e2.statusCode = 400;
-                    throw e2;
-                  }
-                }
-              }
-            } else if (fallback != null) {
-              for (const s of steps) {
-                const d = s.data || (s.data = {});
-                if (d.tabId == null) d.tabId = fallback;
-              }
-            }
-          }
-          // 步骤已逐条校验并注入, 直接发送(不走 cmd(), 避免多 tab 会话约束再次拦截 batch 本身)
-          // 裸 batch(无 tabId/session)的批内 tab 跟踪由插件 runBatch 处理(open-url 新 tab 自动跟随)
-          result = await this.sendToPlugin({ type: 'batch', data: { steps } }, batchTimeout);
-          // 批内含写操作则失效相关 tab 的只读与快照缓存(原 bypass cmd 导致脏缓存)
-          try {
-            const ctx2b = this.als.getStore() || {};
-            const affected = new Set();
-            for (const s of (Array.isArray(steps) ? steps : [])) {
-              if (this.writeTypes.has(s.type)) {
-                const tid = s.data?.tabId != null ? String(s.data.tabId) : String(ctx2b.tabId ?? this.resolveCacheTab());
-                affected.add(tid);
-              }
-            }
-            for (const tid of affected) {
-              for (const k of [...this.cache.keys()]) if (k.endsWith(`:${tid}`)) this.cache.delete(k);
-              const pref = `snap:${tid}:`;
-              for (const k of [...this.snapshotCache.keys()]) if (k.startsWith(pref)) this.snapshotCache.delete(k);
-            }
-          } catch {}
-          break;
-        }
-
-        // ============ 页面 / 导航 ============
-        case '/open': {
-          const openBody = await this.readBody(req);
-          result = await this.cmd('open-url', openBody);
-          // current 导航未显式指定 tabId 时: 回显实际作用的目标 tab(防多标签漂移误判)
-          if (openBody.current && result?.tabId != null && tabId == null) {
-            result.usedTabId = result.tabId;
-            result.hint = 'current 导航未指定 ?tabId=, 作用于当前激活标签页; 多标签场景请显式 ?tabId=<id>';
-          }
-          // 会话内新建标签页(current:false): 新 tab 自动归属会话, 免手动 assign
-          if (sessionId != null && !openBody.current && result?.tab?.id != null) {
-            const sess = this.sessions.get(String(sessionId));
-            if (sess) {
-              sess.tabIds.add(result.tab.id);
-              result.sessionId = sessionId;
-            }
-          }
-          break;
-        }
-
-        case '/navigate': {
-          // 语义: 当前标签页导航(不新开 tab), 等价 /open {url, current: true}
-          const navBody = await this.readBody(req);
-          navBody.current = true;
-          result = await this.cmd('open-url', navBody);
-          break;
-        }
-
-        case '/reload':
-          result = await this.cmd('reload', await this.readBody(req).catch(() => ({})));
-          break;
-
-        case '/back':
-          result = await this.cmd('back', {});
-          break;
-
-        case '/forward':
-          result = await this.cmd('forward', {});
-          break;
-
-        case '/tab/activate':
-          result = await this.cmd('activate-tab', await this.readBody(req));
-          break;
-
-        case '/tab/close':
-          result = await this.cmd('close-tab', await this.readBody(req));
-          break;
-
-        // ============ 页面信息 / DOM ============
-        case '/page-info':
-          result = await this.cmd('get-page-info');
-          break;
-
-        case '/dom':
-          result = await this.cmd('get-dom');
-          break;
-
-        case '/html':
-          result = await this.cmd('get-html', await this.readBody(req).catch(() => ({})));
-          break;
-
-        case '/frames':
-          result = await this.cmd('get-frames', {});
-          break;
-
-        case '/layout':
-          result = await this.cmd('get-layout', {});
-          break;
-
-        case '/query':
-          result = await this.cmd('query-selector', await this.readBody(req));
-          break;
-
-        case '/query-all':
-          result = await this.cmd('query-all', await this.readBody(req));
-          break;
-
-        case '/query-many':
-          result = await this.cmd('query-many', await this.readBody(req));
-          break;
-
-        case '/exists':
-          result = await this.cmd('element-exists', await this.readBody(req));
-          break;
-
-        // 插件命令名别名(与 CLI chain TYPE_MAP / /batch 对齐, 消除三方不一致):
-        // /get-text=/text /get-attr=/attr /get-value=/value
-        case '/get-text':
-        case '/text':
-          result = await this.cmd('get-text', await this.readBody(req).catch(() => ({})));
-          break;
-
-        case '/get-attr':
-        case '/attr':
-          result = await this.cmd('get-attr', await this.readBody(req));
-          break;
-
-        case '/get-value':
-        case '/value':
-          result = await this.cmd('get-value', await this.readBody(req));
-          break;
-
-        // ============ 元素操作 ============
-        case '/click':
-          result = await this.cmd('click-element', await this.readBody(req));
-          break;
-
-        case '/hover':
-          result = await this.cmd('hover-element', await this.readBody(req));
-          break;
-
-        case '/dblclick':
-          result = await this.cmd('double-click', await this.readBody(req));
-          break;
-
-        case '/rightclick':
-          result = await this.cmd('right-click', await this.readBody(req));
-          break;
-
-        case '/drag':
-          result = await this.cmd('drag-element', await this.readBody(req));
-          break;
-
-        case '/mouse':
-          result = await this.cmd('mouse', await this.readBody(req));
-          break;
-
-        case '/scroll':
-          result = await this.cmd('scroll-page', await this.readBody(req));
-          break;
-
-        case '/scroll-into-view':
-          result = await this.cmd('scroll-into-view', await this.readBody(req));
-          break;
-
-        case '/scroll-by':
-          result = await this.cmd('scroll-by', await this.readBody(req));
-          break;
-
-        // ============ 键盘 / 输入 ============
-        case '/key':
-          result = await this.cmd('simulate-key', await this.readBody(req));
-          break;
-
-        case '/type':
-          result = await this.cmd('type-text', await this.readBody(req));
-          break;
-
-        case '/fill':
-          result = await this.cmd('fill-form', await this.readBody(req));
-          break;
-
-        case '/select':
-          result = await this.cmd('select-option', await this.readBody(req));
-          break;
-
-        case '/check':
-          result = await this.cmd('check-box', await this.readBody(req));
-          break;
-
-        case '/clear':
-          result = await this.cmd('clear-field', await this.readBody(req));
-          break;
-
-        case '/focus':
-          result = await this.cmd('focus-element', await this.readBody(req));
-          break;
-
-        // ============ JS 执行 / 等待 ============
-        case '/evaluate':
-          result = await this.cmd('evaluate', await this.readBody(req));
-          break;
-
-        // 等待类端点: 服务端 cmd 超时必须跟随 body.timeout, 否则用户请求 40s 等待会被默认 20s 掐断
-        // (实测: wait-for-load {timeout:40000} 在挂起资源页面上 20s 被 server 超时, 插件侧仍在等)
-        case '/wait-for':
-        case '/wait-for-text':
-        case '/wait-for-url':
-        case '/wait-for-load': {
-          const body = await this.readBody(req).catch(() => ({}));
-          const waitMs = Math.min(Math.max((+body.timeout || 15000) + 5000, 20000), 300000);
-          const typeMap = { '/wait-for': 'wait-for-selector', '/wait-for-text': 'wait-for-text', '/wait-for-url': 'wait-for-url', '/wait-for-load': 'wait-for-load' };
-          result = await this.cmd(typeMap[pathname], body, waitMs);
-          break;
-        }
-
-        // ============ 截图 / PDF ============
-        case '/screenshot':
-          result = await this.cmd('screenshot', {
-            format: url.searchParams.get('format') || 'png',
-            quality: +url.searchParams.get('quality') || 80
-          });
-          break;
-
-        case '/screenshot/full':
-          // 插件端 guardedCommand 看门狗 25s + 内部 fallback 链最长可到 ~40s, server 超时必须 > 插件端, 否则退化环境下被提前 504
-          result = await this.cmd('screenshot-full', {
-            format: url.searchParams.get('format') || 'png',
-            quality: +url.searchParams.get('quality') || 80
-          }, 45000);
-          break;
-
-        case '/screenshot/element':
-          // 元素截图插件端重试一次(2×15s+间隔), server 侧对齐
-          result = await this.cmd('screenshot-element', await this.readBody(req), 35000);
-          break;
-
-        case '/snapshot':
-        case '/snapshot/binary': {
-          // 视觉快照: GET 用 query，POST 用 body，二者合并；/binary 或 ?binary=1 直接返回 image/* 二进制
-          const isBinary = pathname.endsWith('/binary') || url.searchParams.get('binary') === '1';
-          let snapParams = {};
-          if (req.method === 'POST') {
-            try { snapParams = await this.readBody(req); } catch { snapParams = {}; }
-          }
-          // query 覆盖/补充 body
-          const q = (k) => url.searchParams.get(k);
-          if (q('format')) snapParams.format = q('format');
-          if (q('quality')) snapParams.quality = +q('quality');
-          if (q('annotate') != null) snapParams.annotate = q('annotate') === '1' || q('annotate') === 'true';
-          if (q('full') != null) snapParams.full = q('full') === '1' || q('full') === 'true';
-          if (q('compact') != null) snapParams.compact = q('compact') !== '0' && q('compact') !== 'false';
-          if (q('maxElements')) snapParams.maxElements = +q('maxElements');
-          if (q('selector')) snapParams.selector = q('selector');
-          if (q('fast') != null) snapParams.fast = q('fast') === '1' || q('fast') === 'true';
-          if (q('speed') != null) snapParams.speed = q('speed');
-          result = await this.cmd('vision-snapshot', snapParams, 25000);
-          if (isBinary && result && result.dataUrl) {
-            try {
-              const b64 = result.dataUrl.split(',')[1] || result.dataUrl;
-              const buf = Buffer.from(b64, 'base64');
-              const f = String(snapParams.format || '').toLowerCase();
-              const ct = (f === 'jpeg' || f === 'jpg') ? 'image/jpeg' : f === 'webp' ? 'image/webp' : 'image/png';
-              // 元信息走 Header(截断防超限)，主图走 body，AI 仍可解析图 + 锚点
-              const elsHeader = JSON.stringify(result.elements || []).slice(0, 8000);
-              res.writeHead(200, {
-                'Content-Type': ct,
-                'Content-Length': buf.length,
-                'X-Snapshot-Url': encodeURIComponent(result.url || ''),
-                'X-Snapshot-Title': encodeURIComponent(result.title || ''),
-                'X-Snapshot-Elements': encodeURIComponent(elsHeader),
-                'X-Snapshot-Viewport': JSON.stringify(result.viewport || {}),
-                'Cache-Control': 'no-store'
-              });
-              res.end(buf);
-              // 已直接发送二进制，不再走外层 send
-              return;
-            } catch (e) {
-              // 二进制失败回退 JSON
-              result._binaryError = e.message;
-            }
-          }
-          break;
-        }
-
-        case '/snapshot/zoom': {
-          // 裁剪放大截图: 小字/细节读不清时用。ref 指 SoM 编号(需先拍一次 annotate snapshot)
-          const body = req.method === 'POST' ? await this.readBody(req).catch(() => ({})) : {};
-          if (url.searchParams.get('ref')) body.ref = +url.searchParams.get('ref');
-          if (url.searchParams.get('selector')) body.selector = url.searchParams.get('selector');
-          if (url.searchParams.get('scale')) body.scale = +url.searchParams.get('scale');
-          if (url.searchParams.get('format')) body.format = url.searchParams.get('format');
-          if (url.searchParams.get('quality')) body.quality = +url.searchParams.get('quality');
-          body.tabId = tabId ?? undefined;
-          result = await this.cmd('zoom-shot', body, 25000);
-          break;
-        }
-
-        case '/snapshot/text': {
-          // 可见文本块 + 紧致坐标(不用截图就能"读"页面): 读小字/取文案/交叉校验用
-          const body = req.method === 'POST' ? await this.readBody(req).catch(() => ({})) : {};
-          if (url.searchParams.get('max')) body.max = +url.searchParams.get('max');
-          if (url.searchParams.get('minLen')) body.minLen = +url.searchParams.get('minLen');
-          result = await this.cmd('text-map', body, 15000);
-          break;
-        }
-
-        case '/wait-for-stable': {
-          // 等待页面稳定(DOM 连续静默): 替代固定 sleep, 避免拍到渲染过渡态
-          const body = req.method === 'POST' ? await this.readBody(req).catch(() => ({})) : {};
-          if (url.searchParams.get('timeout')) body.timeout = +url.searchParams.get('timeout');
-          if (url.searchParams.get('quiet')) body.quiet = +url.searchParams.get('quiet');
-          result = await this.cmd('wait-for-stable', body, Math.max(5000, (body.timeout || 15000) + 3000));
-          break;
-        }
-
-        case '/reload-extension': {
-          // 让浏览器重载插件代码(改完插件后用来自我更新; 重载后 CDP 授权失效需重新「启用调试」)
-          result = await this.cmd('reload-extension', {}, 8000);
-          break;
-        }
-
-        case '/fast/snapshot': {
-          // 快照快路径别名，默认 fast:true + 15s 超时
-          let snapParams = { fast: true };
-          if (req.method === 'POST') {
-            try { Object.assign(snapParams, await this.readBody(req)); } catch {}
-          }
-          const q = (k) => url.searchParams.get(k);
-          if (q('format')) snapParams.format = q('format');
-          if (q('quality')) snapParams.quality = +q('quality');
-          if (q('annotate') != null) snapParams.annotate = q('annotate') === '1' || q('annotate') === 'true';
-          if (q('full') != null) snapParams.full = q('full') === '1' || q('full') === 'true';
-          if (q('maxElements')) snapParams.maxElements = +q('maxElements');
-          if (q('selector')) snapParams.selector = q('selector');
-          result = await this.cmd('vision-snapshot', snapParams, 15000);
-          break;
-        }
-
-        case '/fast/act':
-        case '/act': {
-          const body = await this.readBody(req);
-          const { action, ...data } = body || {};
-          if (!action) { result = { error: 'action is required (snapshot|click|clickRef|hoverRef|fillRef|readText|zoom|clickText|fill|type|extract|navigate|evaluate)' }; break; }
-          switch (action) {
-            case 'snapshot': result = await this.cmd('vision-snapshot', { fast: true, ...data }, 15000); break;
-            case 'click': result = await this.cmd('click-element', { fast: true, ...data }); break;
-            // ---- 视觉优先: 直接按 SoM 编号(ref)操作, 无需坐标换算, 滚动后仍安全 ----
-            // 支持 waitFor: 'load'|'url'|'text'|'selector' —— 点击后立即等条件成立, 省一次往返
-            case 'clickRef': result = await this.maybeWaitAfter(data, await this.cmd('click-ref', { fast: true, ...data })); break;
-            case 'hoverRef': result = await this.cmd('hover-ref', { ...data }); break;
-            case 'fillRef': result = await this.maybeWaitAfter(data, await this.cmd('fill-ref', { ...data })); break;
-            case 'readText': result = await this.cmd('read-text', { ...data }); break;
-            case 'zoom': result = await this.cmd('zoom-shot', { ...data }, 25000); break;
-            // 按可见文本查找元素(不点击), 返回 ref/坐标/上下文 —— 快照里没看清时的定点工具
-            case 'find': result = await this.cmd('find-text', { ...data }); break;
-            // 批量 ref 动作: 一次 HTTP 完成多步 [{op:'click',ref:3},{op:'fill',ref:2,value:'x'}]
-            case 'refs': {
-              const steps = Array.isArray(data.steps) ? data.steps : [];
-              if (!steps.length) { result = { error: 'steps is required: [{op:"click"|"hover"|"fill"|"read", ref, value?}]' }; break; }
-              const opMap = { click: 'click-ref', hover: 'hover-ref', fill: 'fill-ref', read: 'read-text', readText: 'read-text' };
-              const out = [];
-              for (const s of steps) {
-                const cmd = opMap[s.op];
-                if (!cmd) { out.push({ op: s.op, error: `unknown op: ${s.op}` }); continue; }
-                try {
-                  const r = await this.cmd(cmd, { ...s, ...(s.tabId != null ? {} : {}) });
-                  out.push({ op: s.op, ref: s.ref, result: r });
-                } catch (e) { out.push({ op: s.op, ref: s.ref, error: e.message }); }
-              }
-              result = { success: out.every(o => !o.error), steps: out };
-              break;
-            }
-            case 'clickText': {
-              // 视觉文本点击：snapshot 坐标优先，evaluate 兜底
-              try {
-                const snap = await this.cmd('vision-snapshot', { maxElements: 50, fast: true }, 8000);
-                const hit = snap?.elements?.find(e => (e.text || '').includes(data.text) || (e.name || '').includes(data.text));
-                if (hit && hit.center) {
-                  result = await this.cmd('mouse', { type: 'click', x: hit.center.x, y: hit.center.y, fast: true });
-                  if (result && !result.error) { result.method = 'fast-snapshot-text'; break; }
-                }
-              } catch {}
-              const code = `return (()=>{ const els=[...document.querySelectorAll('a, button, [role="button"]')]; const t=${JSON.stringify(data.text||'')}; const hit=els.find(e=> (e.innerText||e.textContent||'').includes(t)); if(hit){ hit.click(); return {tag:hit.tagName, text:hit.innerText?.slice(0,50)} } return null; })()`;
-              result = await this.cmd('evaluate', { code });
-              break;
-            }
-            case 'fill': result = await this.cmd('fill-form', data); break;
-            case 'type': result = await this.cmd('type-text', data); break;
-            case 'extract': result = await this.cmd('query-many', { selectors: data.selectors || data.selectors }); break;
-            case 'navigate': result = await this.cmd('open-url', { url: data.url, current: !!data.current }); break;
-            case 'evaluate': result = await this.cmd('evaluate', data); break;
-            default: result = { error: `unknown action: ${action}` }; break;
-          }
-          break;
-        }
-
-        case '/fast/click': {
-          const body = await this.readBody(req);
-          // fast/click 复用 act 逻辑
-          result = await this.cmd('click-element', { fast: true, ...body });
-          break;
-        }
-
-        case '/fast/fill': {
-          const body = await this.readBody(req);
-          result = await this.cmd('fill-form', body);
-          break;
-        }
-
-        case '/pdf': {
-          const pdfBody = await this.readBody(req);
-          result = await this.cmd('print-to-pdf', {
-            format: url.searchParams.get('format') || pdfBody.format || 'A4',
-            landscape: pdfBody.landscape === true,
-            printBackground: pdfBody.printBackground !== false,
-            ...(pdfBody.margin ? { margin: pdfBody.margin } : {})
-          });
-          break;
-        }
-
-        case '/upload':
-          result = await this.cmd('upload-file', await this.readBody(req));
-          break;
-
-        // ============ 高亮 ============
-        case '/highlight':
-          result = await this.cmd('highlight-elements', await this.readBody(req));
-          break;
-
-        case '/highlight/clear':
-          result = await this.cmd('clear-highlights', {});
-          break;
-
-        // ============ 弹窗 ============
-        case '/dialog':
-          result = await this.cmd('dialog', await this.readBody(req));
-          break;
-
-        case '/dialogs':
-          result = await this.cmd('get-dialogs', {});
-          break;
-
-        // ============ 环境模拟 ============
-        case '/auto-dark':
-          result = await this.cmd('auto-dark-mode', await this.readBody(req));
-          break;
-
-        case '/js':
-          result = await this.cmd('set-script-disabled', await this.readBody(req));
-          break;
-
-        case '/hardware-concurrency':
-          result = await this.cmd('set-hardware-concurrency', await this.readBody(req));
-          break;
-
-        // ============ Cookie ============
-        case '/cookies':
-          result = await this.cmd('get-cookies', {});
-          break;
-
-        case '/cookie':
-          result = await this.cmd('set-cookie', await this.readBody(req));
-          break;
-
-        case '/cookie/remove':
-          result = await this.cmd('remove-cookie', await this.readBody(req));
-          break;
-
-        // ============ Storage ============
-        case '/storage':
-          if (req.method === 'POST') {
-            result = await this.cmd('set-storage', await this.readBody(req));
-          } else {
-            result = await this.cmd('get-storage', { type: url.searchParams.get('type') || 'local' });
-          }
-          break;
-
-        case '/storage/remove':
-          result = await this.cmd('remove-storage', await this.readBody(req));
-          break;
-
-        case '/storage/clear':
-          result = await this.cmd('clear-storage', await this.readBody(req));
-          break;
-
-        // ============ 网络 ============
-        case '/network': {
-          const filter = url.searchParams.get('filter');
-          const tabId = url.searchParams.get('tabId');
-          const type = url.searchParams.get('type');
-          const limit = parseInt(url.searchParams.get('limit')) || 500;
-          let logs = this.networkLogs;
-          if (tabId) logs = logs.filter(l => String(l.tabId) === String(tabId));
-          if (filter) logs = logs.filter(l => (l.url || '').includes(filter));
-          if (type) logs = logs.filter(l => l.type === type);
-          result = logs.slice(-limit);
-          break;
-        }
-
-        case '/network/clear':
-          this.networkLogs = [];
-          await this.cmd('clear-network-logs', {}).catch(() => {});
-          result = { success: true };
-          break;
-
-        case '/network/response':
-          result = await this.cmd('get-response-body', await this.readBody(req));
-          break;
-
-        case '/network/block':
-          result = await this.cmd('block-urls', await this.readBody(req));
-          break;
-
-        case '/network/unblock':
-          result = await this.cmd('unblock-urls', {});
-          break;
-
-        case '/network/conditions':
-          result = await this.cmd('set-network-conditions', await this.readBody(req));
-          break;
-
-        case '/network/conditions/reset':
-          result = await this.cmd('reset-network-conditions', {});
-          break;
-
-        case '/network/disable-cache':
-          result = await this.cmd('set-cache-disabled', await this.readBody(req));
-          break;
-
-        case '/bypass-csp':
-          result = await this.cmd('bypass-csp', await this.readBody(req));
-          break;
-
-        // ============ 性能 ============
-        case '/performance':
-          result = await this.cmd('get-performance');
-          break;
-
-        case '/vitals':
-          result = await this.cmd('get-web-vitals', {}, 15000);
-          break;
-
-        case '/resources':
-          result = await this.cmd('get-resources');
-          break;
-
-        case '/cpu':
-          result = await this.cmd('set-cpu-throttling', await this.readBody(req));
-          break;
-
-        // ============ 模拟 ============
-        case '/device':
-          result = await this.cmd('simulate-device', await this.readBody(req));
-          break;
-
-        case '/device/clear':
-          result = await this.cmd('clear-device', {});
-          break;
-
-        // 一键恢复全部模拟/策略影响(任务结束/中断后清理, 不干扰用户浏览)
-        case '/reset-all':
-          result = await this.cmd('reset-all-simulations', {});
-          break;
-
-        case '/media':
-          result = await this.cmd('emulate-media', await this.readBody(req));
-          break;
-
-        case '/geo':
-          result = await this.cmd('set-geolocation', await this.readBody(req));
-          break;
-
-        case '/locale':
-          result = await this.cmd('set-locale', await this.readBody(req));
-          break;
-
-        case '/timezone':
-          result = await this.cmd('set-timezone', await this.readBody(req));
-          break;
-
-        // ============ 检查 ============
-        case '/security':
-          result = await this.cmd('security-check');
-          break;
-
-        case '/a11y':
-          result = await this.cmd('a11y-check');
-          break;
-
-        case '/seo':
-          result = await this.cmd('seo-check');
-          break;
-
-        // ============ 控制台 / DOM 变化 ============
-        case '/console': {
-          const tabId = url.searchParams.get('tabId');
-          const limit = parseInt(url.searchParams.get('limit')) || 500;
-          if (tabId) {
-            result = await this.cmd('get-console-logs', { tabId, limit });
-          } else if (this.consoleLogs.length > 0) {
-            result = this.consoleLogs.slice(-limit);
-          } else {
-            result = await this.cmd('get-console-logs', { limit });
-          }
-          break;
-        }
-
-        case '/console/clear':
-          this.consoleLogs = [];
-          await this.cmd('clear-console-logs', {}).catch(() => {});
-          result = { success: true };
-          break;
-
-        case '/dom-changes':
-          result = await this.cmd('get-dom-changes', {});
-          break;
-
-        case '/dom-changes/clear':
-          result = await this.cmd('clear-dom-changes', {});
-          break;
-
-        // ============ 批量分析 / 监控 ============
-        case '/full': {
-          // 3s 缓存, ?fresh=1 绕过
-          const fullCacheKey = `full:${this.resolveCacheTab()}`;
-          const fullCached = fresh ? null : this.getCache(fullCacheKey);
-          if (fullCached) { result = fullCached; break; }
-          const [dom, performance, vitals, security, a11y, seo, pageInfo] = await Promise.all([
-            this.cmd('get-dom').catch(e => ({ error: e.message })),
-            this.cmd('get-performance').catch(e => ({ error: e.message })),
-            this.cmd('get-web-vitals', {}, 15000).catch(e => ({ error: e.message })),
-            this.cmd('security-check').catch(e => ({ error: e.message })),
-            this.cmd('a11y-check').catch(e => ({ error: e.message })),
-            this.cmd('seo-check').catch(e => ({ error: e.message })),
-            this.cmd('get-page-info').catch(e => ({ error: e.message }))
-          ]);
-          result = { dom, performance, vitals, security, a11y, seo, pageInfo };
-          this.setCache(fullCacheKey, result, 3000);
-          break;
-        }
-
-        case '/analyze-all':
-          result = await this.analyzeAllTabs();
-          break;
-
-        case '/monitor':
-          result = this.startMonitoring(await this.readBody(req));
-          break;
-
-        case '/monitor/stop':
-          result = this.stopMonitoring();
-          break;
-
-        case '/monitor/status':
-          result = this.getMonitorStatus();
-          break;
-
-        // ============ 调试授权 ============
-        case '/debug/attach-all':
-          result = await this.cmd('cdp-attach-all');
-          break;
-
-        case '/debug/detach-all':
-          result = await this.cmd('cdp-detach-all', {});
-          break;
-
-        case '/debug/info':
-          result = await this.cmd('get-browser-info');
-          break;
-
-        case '/debug/cdp-status':
-          result = await this.cmd('get-cdp-status', {});
-          break;
-
-        // ============ 审计引擎 ============
-        case '/audit': {
-          result = await this.runAudit(await this.readBody(req).catch(() => ({})));
-          break;
-        }
-
-        case '/history': {
-          const filterUrl = url.searchParams.get('url');
-          const limit = parseInt(url.searchParams.get('limit')) || 10;
-          result = auditReport.readHistory(filterUrl, limit);
-          break;
-        }
-
-        case '/audit/run': {
-          const body = await this.readBody(req);
-          const { urls = [], budget, settleMs } = body;
-          if (!Array.isArray(urls) || urls.length === 0) {
-            result = { error: 'urls (array) is required' };
-          } else {
-            // 捕获请求级上下文(含会话约束), 队列内所有导航/采集在原 tab 内执行
-            const ctx = this.als.getStore() || null;
-            const id = await this.auditQueue.runTask({
-              urls, budget, settleMs, ctx,
-              onAudit: (url, data) => this.buildAudit(data, budget, url)
-            });
-            result = { success: true, taskId: id };
-          }
-          break;
-        }
-
-        default:
-          return send(404, { error: `Unknown endpoint: ${pathname}`, hint: 'POST 端点需要 JSON body' });
-      }
-      this.setCachedResponse(pathname, result);
-      send(200, result);
-    } catch (e) {
-      // 插件命令超时: 结构化错误(可被调用方识别为弹窗挂起等场景)
-      if (e.code === 'PLUGIN_TIMEOUT') {
-        send(504, {
-          error: e.message,
-          hint: 'GET /dialogs 查看是否有挂起弹窗; POST /dialog {auto:true} 可恢复自动应答',
-          commandType: e.commandType
-        });
-      } else {
-        send(e.statusCode || 500, { error: e.message });
-      }
-    }
-    });
-  }
+  /**
+   * HTTP 请求处理已移至 core/http-shell.js（传输层）与 capabilities/*（业务层）。
+   * 本方法由构造函数装配：this.handleHTTPRequest = createHttpShell(this, this.router, {...})。
+   * 之所以保留这个占位，是为了让"入口在哪"有据可查，而不是留下一个隐形的实例属性。
+   */
 
   /**
    * 解析缓存用的目标 tab 标识: 会话内未显式 tabId 时解析为会话的唯一标签页,
@@ -1753,6 +944,7 @@ class ArkWebServer {
   }
 
   stopMonitoring() {
+    if (this.monitorTimer) { clearTimeout(this.monitorTimer); this.monitorTimer = null; }
     if (this.monitorInterval) {
       clearInterval(this.monitorInterval);
       this.monitorInterval = null;
@@ -1857,10 +1049,35 @@ class ArkWebServer {
     }
   }
 
+  /** WS 的来源校验：比 HTTP 更严。
+   *
+   *  为什么必须单独挡：WebSocket 握手不受 CORS 约束，任意网页都能向 ws://127.0.0.1:9334
+   *  发起连接（Chrome 的私网访问限制只在部分场景生效）。默认策略：
+   *    · 无 Origin        → 本机进程（CLI/脚本），放行
+   *    · chrome-extension://（含 moz-/safari-web-extension）→ 浏览器扩展，放行
+   *    · http(s)://       → 网页，一律拒绝（含本机页面 —— 本机页面已可用带令牌的 HTTP 通道）
+   *  确需让本机页面走 WS 的老用法：ARK_WS_ALLOW_LOCAL=1。
+   */
+  isAllowedWsOrigin(origin) {
+    if (!origin) return true;
+    try {
+      const u = new URL(origin);
+      if (EXTENSION_PROTOCOLS.has(u.protocol)) return true;
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        if (process.env.ARK_WS_ALLOW_LOCAL === '1') return true;
+        return false;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   printSecurityBanner() {
     console.log('[ArkWeb] 安全状态:');
     console.log(`  · 监听地址: ${this.host}:${this.port} / ws ${this.host}:${this.wsPort} (仅回环, 局域网不可达)`);
     console.log('  · Host/Origin 校验: 已启用(仅回环 Host + 本机/扩展来源)');
+    console.log('  · WS 来源校验: 已启用(网页来源一律拒绝, 仅扩展与无 Origin 的本机进程可连)');
     if (this.authSource === 'disabled') {
       console.warn('  · 令牌鉴权: 已禁用(ARK_NO_AUTH=1) —— 本机任意进程与任意网页均可操控浏览器, 请勿在不可信环境使用!');
     } else {
@@ -1872,7 +1089,8 @@ class ArkWebServer {
     if (this.wsTokenRequired) {
       console.log('  · WS 令牌: 已启用(插件 popup 需填入相同令牌)');
     } else {
-      console.warn('  · WS 令牌: 未启用 —— 本机任意进程可直连 9334 控制浏览器。需要防护请设置 ARK_TOKEN 并在插件 popup 填入相同值。');
+      console.log('  · WS 令牌: 未启用。网页来源已被来源校验挡住; 同机其他用户/进程仍可直连 9334 ——');
+      console.log('    多人共用或不可信本机环境下, 设置 ARK_TOKEN 并在插件 popup 填同一令牌即可完全关闭。');
     }
     console.log('');
   }
@@ -1902,7 +1120,16 @@ class ArkWebServer {
     }
   }
 
-  readBody(req) {
+  /**
+   * 读取并解析请求体。
+   * @param {object} req
+   * @param {{allowEmpty?: boolean}} [opts]
+   *   allowEmpty: 解析失败时返回 {} 而不是抛 400。
+   *   只有"GET 等本来就不带 body"的场合才该用它；带 body 的 POST 解析失败必须报 400 ——
+   *   否则参数被静默丢弃、调用方以为参数生效了（历史上 6 个能力模块用 catch(()=>({})) 吞过）。
+   */
+  readBody(req, opts) {
+    const allowEmpty = !!(opts && opts.allowEmpty);
     return new Promise((resolve, reject) => {
       const chunks = [];
       let total = 0;
@@ -1922,6 +1149,7 @@ class ArkWebServer {
           const parsed = JSON.parse(text);
           resolve(parsed && typeof parsed === 'object' ? parsed : {});
         } catch (e) {
+          if (allowEmpty) { resolve({}); return; }
           // 不再静默吞掉坏 JSON: 返回 400 结构化错误, 便于客户端(如 PowerShell 中文损坏)定位
           const err = new Error(`无效 JSON body: ${e.message} | 收到(前120字符): ${text.slice(0, 120)}`);
           err.statusCode = 400;

@@ -725,6 +725,15 @@ if (require.main === module) {
         case 'find': result = await client.find(args.slice(1).join(' ')); break;
         case 'text-map': result = await client.textMap(parseJsonOrRaw(args[1], {})); break;
         case 'refs': result = await client.refs(parseJsonOrRaw(args.slice(1).join(' '), [])); break;
+      case 'set-key': {
+        // 面板自检里的提示指向本命令：写入模型密钥到 ~/.ark-web/deepseek.key（立即生效）。
+        // 参数取法与其它子命令一致（args 数组，不是 process.argv）
+        const key = args[1];
+        if (!key) { console.error('用法: node client/browser-client.js set-key <你的密钥>'); process.exit(1); }
+        const out = await client.request('/settings/api-key', { method: 'POST', body: { key } });
+        console.log(out && out.ok ? ('已写入密钥: ' + (out.keyHint || '') + ' → ' + (out.file || '')) : ('写入失败: ' + JSON.stringify(out)));
+        return out;
+      }
         case 'reload-extension': result = await client.reloadExtension(); break;
         case 'zoom': {
           // 用法: zoom [ref|selector] [out.png|out.webp] [--scale=3] [--format=webp]

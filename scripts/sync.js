@@ -17,9 +17,10 @@ const os = require('os');
 const path = require('path');
 
 const SELF_ROOT = path.resolve(__dirname, '..');
-const DIRS = ['extension', 'server', 'client', 'scripts', 'references'];
+// skills/ 要跟着走：副本里的 bridge-server 按自身根目录找项目技能
+const DIRS = ['extension', 'server', 'client', 'scripts', 'references', 'skills'];
 const FILES = ['SKILL.md', 'README.md', 'CHANGELOG.md', 'ark.js', 'start.bat', 'start.sh'];
-const SKIP = new Set(['node_modules', '.ark-token', 'data', 'reports', 'chrome-profile', '.git']);
+const SKIP = new Set(['node_modules', '.ark-token', 'data', 'reports', 'chrome-profile', '.git', 'l10n-backup']);
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
 const valOf = (f) => { const i = args.indexOf(f); return i > -1 ? args[i + 1] : null; };
@@ -29,7 +30,12 @@ const YES = has('--yes');
 /** 从浏览器用户数据读取已加载扩展目录 */
 function loadedExtensionDirs() {
   const out = new Set();
-  const bases = ['Google\\Chrome', 'Quark', 'Chromium', 'BraveSoftware\\Brave-Browser', 'Microsoft\\Edge']
+  const bases = [
+    'Google\\Chrome', 'Quark', 'Chromium', 'BraveSoftware\\Brave-Browser', 'Microsoft\\Edge',
+    // 产品浏览器 BrowserOS（Chromium 分支，用户数据目录叫 BrowserClaw）—— 早期漏了它，
+    // 导致 BrowserOS 里那份副本从来同步不到，只能手动复制。
+    'BrowserClaw', 'BrowserOS'
+  ]
     .map(b => path.join(process.env.LOCALAPPDATA || '', b, 'User Data'));
   for (const base of bases) {
     if (!base || !fs.existsSync(base)) continue;
@@ -105,6 +111,17 @@ function backupChanged(src, dest, rel, backupDir) {
 }
 
 (async () => {
+  // 0. 先刷新「可注入副本」—— extension/injected/ 由 semantic/ 生成，随扩展一起同步
+  try {
+    const injected = require('./lib/build-injected').refresh({ dryRun: DRY });
+    if (injected.changed.length) {
+      console.log(`\n生成可注入副本: ${injected.changed.join(', ')}${DRY ? '（预演，未写入）' : ''}`);
+    }
+  } catch (e) {
+    console.error('生成 extension/injected/ 失败: ' + e.message);
+    process.exit(1);
+  }
+
   const explicit = valOf('--to');
   let targets = [];
   if (explicit) {

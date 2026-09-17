@@ -1,54 +1,81 @@
 #!/usr/bin/env node
 /**
- * check-endpoints.js — 核对 server 路由表与 listEndpoints 声明是否一致
- * 用法: node scripts/check-endpoints.js
+ * check-endpoints.js — 路由与端点文档的一致性检查（双向）
+ *
+ * 历史教训：本脚本原先靠正则去抓 bridge-server.js 里的 `case '/x':` 与 listEndpoints()
+ * 声明。重构把巨型 switch 拆成 capabilities/* 之后，两个正则都抓不到东西，
+ * 于是它输出"switch 路由 0 个 / 声明 0 个 / ✓ 完全一致" —— 0 对 0 的空洞通过，
+ * 还一直在 CI 里报绿。这类"检查本身失效"比没有检查更危险。
+ *
+ * 现在的做法：直接加载能力模块（它们只导出对象，无副作用），取真实路由表，
+ * 与 server/core/endpoint-docs.js 双向比对：
+ *   · 有路由没说明 → undocumented（要求补文档）
+ *   · 有说明没路由 → stale（要求删说明）
+ * 任一非空即失败（退出码 1）。
+ *
+ * 用法: node scripts/check-endpoints.js [--list]
  */
-const fs = require('fs');
+
 const path = require('path');
 
-const serverPath = path.join(__dirname, '..', 'server', 'bridge-server.js');
-const src = fs.readFileSync(serverPath, 'utf8');
+const caps = require(path.join(__dirname, '..', 'server', 'capabilities'));
+const docs = require(path.join(__dirname, '..', 'server', 'core', 'endpoint-docs'));
 
-// 提取 switch 中的 case 路由
-const cases = new Set();
-const re = /case\s+'(\/[^']+)':/g;
-let m;
-while ((m = re.exec(src)) !== null) cases.add(m[1]);
-
-// 提取 listEndpoints 中的路径(仅路径部分, 忽略参数说明)
-const listBlock = src.match(/listEndpoints\(\)\s*\{\s*return\s*\[([\s\S]*?)\]\s*;/);
-const declared = new Set();
-if (listBlock) {
-  const re2 = /'(?:GET|POST)\s+(\/[^\s'?]+)/gi;
-  let m2;
-  while ((m2 = re2.exec(listBlock[1])) !== null) {
-    declared.add(m2[1].replace(/\/$/, ''));
-  }
+/** 从文档行里取出路径，如 "GET  /status" → /status、"POST /agent/confirm {id,approve}" → /agent/confirm
+ *  参数占位符两种写法都接受：文档里习惯写 <id>，注册表里是 :id —— 归一化后再比。 */
+function docPath(line) {
+  const m = /^(?:GET|POST|ANY|PUT|DELETE)\s+([^\s?]+)/i.exec(String(line || '').trim());
+  if (!m) return null;
+  return m[1].replace(/<([^>]+)>/g, ':$1');
 }
 
-let issues = 0;
-// 前缀路由(带 <id> 等参数占位符): 验证源码中存在对应 startsWith 处理
-for (const d of declared) {
-  if (d.includes('<')) {
-    const prefix = d.split('<')[0].replace(/\/$/, '');
-    if (!src.includes(`startsWith('${prefix}`)) {
-      console.log(`⚠ 前缀路由未实现: ${d}`);
-      issues++;
+function main() {
+  const routes = new Map();   // path → capability
+  for (const c of caps) {
+    for (const p of Object.keys(c.routes || {})) {
+      if (!routes.has(p)) routes.set(p, c.name);
     }
-    continue;
   }
-  if (!cases.has(d)) { console.log(`⚠ 已声明但未实现: ${d}`); issues++; }
-}
-for (const c of cases) {
-  if (!declared.has(c)) { console.log(`⚠ 已实现但未声明: ${c}`); issues++; }
+
+  const documented = new Map();   // path → 原始说明行
+  const nonPathLines = [];
+  for (const line of docs) {
+    const p = docPath(line);
+    if (p) { if (!documented.has(p)) documented.set(p, line); }
+    else nonPathLines.push(line);   // "通用: …" 这类说明行
+  }
+
+  if (process.argv.includes('--list')) {
+    for (const [p, cap] of routes) console.log(p + '   [' + cap + ']');
+    console.log('');
+    console.log('路由 ' + routes.size + ' 个，文档 ' + documented.size + ' 条');
+    return;
+  }
+
+  console.log('路由（能力模块声明）: ' + routes.size + ' 个，跨 ' + caps.length + ' 个能力域');
+  console.log('端点文档            : ' + documented.size + ' 条（另有 ' + nonPathLines.length + ' 行通则说明）');
+  console.log('');
+
+  // 防御：任何一边为 0 都说明检查本身失效了（0 对 0 的假绿正是历史事故）
+  if (!routes.size) { console.error('✗ 没取到任何路由 —— 提取逻辑已失效，检查无意义'); process.exit(1); }
+  if (!documented.size) { console.error('✗ 没取到任何端点文档 —— 提取逻辑已失效，检查无意义'); process.exit(1); }
+
+  const undocumented = [...routes.keys()].filter((p) => !documented.has(p));
+  const stale = [...documented.keys()].filter((p) => !routes.has(p));
+
+  let bad = 0;
+  if (undocumented.length) {
+    bad++;
+    console.error('✗ ' + undocumented.length + ' 个路由缺少说明（请在 server/core/endpoint-docs.js 补上）:');
+    for (const p of undocumented) console.error('    ' + p + '   [' + routes.get(p) + ']');
+  }
+  if (stale.length) {
+    bad++;
+    console.error('✗ ' + stale.length + ' 条说明已失效（无对应路由，请删除）:');
+    for (const p of stale) console.error('    ' + p);
+  }
+  console.log(bad ? '' : '✓ 路由与端点文档完全一致（' + routes.size + ' 个，双向零漂移）');
+  process.exit(bad ? 1 : 0);
 }
 
-// 检查默认 404 情况
-console.log(`\nswitch 路由: ${cases.size} 个`);
-console.log(`listEndpoints 声明: ${declared.size} 个`);
-if (issues === 0) {
-  console.log('✓ 端点声明与实现完全一致');
-} else {
-  console.log(`✗ 发现 ${issues} 处不一致`);
-  process.exit(1);
-}
+main();

@@ -26,9 +26,11 @@ class PopupController {
       const host = document.getElementById('wsHost');
       const port = document.getElementById('wsPort');
       const token = document.getElementById('wsToken');
+      const label = document.getElementById('wsLabel');
       if (host) host.value = cfg.host || '127.0.0.1';
       if (port) port.value = cfg.port || 9334;
       if (token) token.value = cfg.token || '';
+      if (label) label.value = cfg.label || '';
       this.updateConfigHint(cfg);
     } catch { /* popup 与 SW 通信失败时保持空值 */ }
   }
@@ -36,7 +38,9 @@ class PopupController {
   updateConfigHint(cfg = {}) {
     const hint = document.getElementById('configHint');
     if (!hint) return;
-    hint.textContent = `当前: ws://${cfg.host || '127.0.0.1'}:${cfg.port || 9334}${cfg.token ? ' (已启用令牌)' : ' (无令牌)'}`
+    hint.textContent = `当前: ws://${cfg.host || '127.0.0.1'}:${cfg.port || 9334}`
+      + ` ｜ 连接名: ${cfg.label || '(默认)'}`
+      + ` ｜ 令牌: ${cfg.token ? '已配置' : '无'}`
       + ' —— 令牌需与 server 的 ARK_TOKEN / ARK_WS_TOKEN 一致。';
   }
 
@@ -126,10 +130,11 @@ class PopupController {
       const host = document.getElementById('wsHost')?.value.trim() || '127.0.0.1';
       const port = document.getElementById('wsPort')?.value.trim() || '9334';
       const token = document.getElementById('wsToken')?.value.trim() || '';
+      const label = document.getElementById('wsLabel')?.value.trim() || '';
       if (btn) { btn.disabled = true; btn.textContent = '保存中...'; }
       try {
-        const saved = await this.sendMessageAsync({ type: 'set-config', data: { host, port, token } });
-        this.updateConfigHint(saved || { host, port, token });
+        const saved = await this.sendMessageAsync({ type: 'set-config', data: { host, port, token, label } });
+        this.updateConfigHint(saved || { host, port, token, label });
         // 等 WS 重连后再刷新状态
         setTimeout(() => this.checkConnection(), 800);
       } catch (e) {
