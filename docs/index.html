@@ -124,10 +124,12 @@ footer{border-top:1px solid var(--line);padding:28px 0;text-align:center;color:v
 start.bat
 <span class="c"># macOS / Linux</span>
 ./start.sh</pre></div>
-<div class="step"><h3>3 · Drive it 操控浏览器</h3><pre><span class="k">curl</span> http://localhost:9333/status
-<span class="k">curl</span> -X POST http://localhost:9333/open \
+<div class="step"><h3>3 · Drive it 操控浏览器</h3><pre><span class="k">curl</span> http://localhost:9333/health   <span class="c"># 免鉴权</span>
+<span class="c"># 其余端点需令牌: ~/.ark-web/token → X-Ark-Token</span>
+<span class="k">curl</span> -H <span class="s">"X-Ark-Token: $(cat ~/.ark-web/token)"</span> http://localhost:9333/status
+<span class="k">curl</span> -H <span class="s">"X-Ark-Token: $(cat ~/.ark-web/token)"</span> -X POST http://localhost:9333/open \
   -d <span class="s">'{"url":"https://example.com"}'</span>
-<span class="k">curl</span> <span class="s">"http://localhost:9333/snapshot?annotate=1"</span></pre></div>
+<span class="k">curl</span> -H <span class="s">"X-Ark-Token: $(cat ~/.ark-web/token)"</span> <span class="s">"http://localhost:9333/snapshot?annotate=1"</span></pre></div>
 </div>
 </section>
 
@@ -147,7 +149,7 @@ start.bat
 
 <section id="security">
 <h2 class="sec"><span>◆</span> Security 安全说明</h2>
-<div class="note"><b>⚠ Localhost-only by design, no auth. 仅限本机调试：</b> Bridge Server binds <code>localhost:9333</code> / WS <code>:9334</code> with <b>no authentication</b> — any local process can fully drive your browser. Never expose the ports, never run in untrusted environments. 请勿将端口暴露到局域网/公网。</div>
+<div class="note"><b>⚠ Localhost-only + token auth. 仅限本机调试：</b> Bridge Server binds <code>localhost:9333</code> / WS <code>:9334</code>; <b>every endpoint except <code>GET /health</code> requires <code>X-Ark-Token</code></b> (token auto-generated at <code>~/.ark-web/token</code>, the CLI reads it automatically). Host/Origin checks are on by default. Never expose the ports, never run in untrusted environments. 请勿将端口暴露到局域网/公网。</div>
 </section>
 </div>
 

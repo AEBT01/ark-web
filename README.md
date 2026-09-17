@@ -19,10 +19,8 @@
 >
 > Control your **real** Chrome from AI — 154 endpoints, snapshot/SoM vision, session isolation, audit engine.
 
-[![version](https://img.shields.io/badge/version-v3.0.2-blue)](https://github.com/AEBT01/ark-web)
+![version](https://img.shields.io/badge/version-v3.0.2-blue)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![stars](https://img.shields.io/github/stars/AEBT01/ark-web?style=social)](https://github.com/AEBT01/ark-web)
-[![last-commit](https://img.shields.io/github/last-commit/AEBT01/ark-web)](https://github.com/AEBT01/ark-web/commits)
 
 > AI 浏览器调试桥接 — 浏览器扩展 + Bridge Server + HTTP API = 真实浏览器控制
 > 支持 Chrome 及 **夸克等 Chromium 内核套壳浏览器**（夸克实测可用，插件会如实上报真实内核）
@@ -51,8 +49,8 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
 审计引擎、故障排查）。让 AI 用上它有两种方式，选一种即可：
 
 - **就地使用**（本机开发仓就是运行位置）：告诉 agent 读 `C:\Users\画扇\browser-debug-extension\SKILL.md`。
-- **复制到 agent 的技能目录**：把本仓库（或其子集）复制到 `%USERPROFILE%\.agents\skills\ark-web\`，
-  agent 按技能名 `ark-web` 自动发现。
+- **入口卡模式**：`%USERPROFILE%\.agents\skills\ark-web\` 目录下只有一张指向本仓的入口卡（`SKILL.md`）；
+  完整手册与运行体都在本仓，就地使用，无需把仓库复制进技能目录。
 
 ### 其他 AI / 新环境接入要点（**踩坑第一名，必读**）
 
@@ -67,7 +65,7 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
    ```
    唯一免鉴权端点是 `GET /health`（还会告诉你 CLI 绝对路径和令牌文件位置）。
 4. **`connected: true` 但命令全部超时** = **僵尸连接**（插件重载/浏览器休眠后残留的旧连接）。
-   v2.9.1 已内建自愈：超时自动换连接重试 + 120s 静默自动清理；仍不行就重启 server。详见 [故障排查](#故障排查)。
+   v2.9.2 已内建自愈：超时自动换连接重试 + 120s 静默自动清理；仍不行就重启 server。详见 [故障排查](#故障排查)。
 5. **浏览器是夸克也能用**：插件注册时会上报真实内核，`/status` 的 `plugin.browser` 显示 `quark`。个别 CDP 域在夸克内核下不生效，已在代码内做脚本兜底（详见 `references/troubleshooting.md`）。
 
 > **Skill v10.2 (视觉优先)**: `SKILL.md` 为唯一手册, 主路径是「快照 → 按编号操作」:
@@ -208,7 +206,7 @@ node ark.js status
 - 自动暗色: `POST /auto-dark` / 禁用 JS: `POST /js` / 硬件并发: `POST /hardware-concurrency`
 - iframe 树: `GET /frames` / 布局指标: `GET /layout`
 - 禁用缓存: `POST /network/disable-cache` / 绕过 CSP: `POST /bypass-csp`
-- **双测试套件**: `real-scenario-v3.js`(20 场景 202 步核心终测, 20/20) + `real-scenario-v4.js`(12 个复杂真实情景任务: 公共站旅程 MDN/apache/IANA + 本地 SPA 路由/受控表单/无限滚动/多步结算 + analyze-all/monitor 期间操作/弹窗手动模式/12 步 batch 长链, 12/12)
+- **双测试套件**: `real-scenario-v3.js`(20 场景约 200 步核心终测, 20/20) + `real-scenario-v4.js`(12 个复杂真实情景任务: 公共站旅程 MDN/apache/IANA + 本地 SPA 路由/受控表单/无限滚动/多步结算 + analyze-all/monitor 期间操作/弹窗手动模式/12 步 batch 长链, 12/12)
 
 ```bash
 # 审计当前页面并生成 HTML 报告
@@ -229,7 +227,7 @@ node client/browser-client.js history https://a.com
 
 `GET  /audit/status/<id>`(审计任务状态)
 
-所有端点支持 `?tabId=<id>` 指定标签页；除 `/health` 外均需 `X-Ark-Token`。完整参数与命令映射见 `references/protocol.md`。
+所有端点支持 `?tabId=<id>` 指定标签页；除 `/health` 外均需 `X-Ark-Token`。本节仅列主要端点（113 个），完整清单以 `node scripts/check-endpoints.js` 的输出为准；完整参数与命令映射见 `references/protocol.md`。
 
 ## 目录结构
 
@@ -258,20 +256,18 @@ ark-web/
 │   ├── sync.js             # 同步到浏览器实际加载的副本(自动备份)
 │   ├── bench-snapshot.js   # 快照效率基准 (对象/紧凑 × png/webp)
 │   ├── demo-vision-flow.js # 视觉闭环参考实现 (8 步全流程, 可照抄)
-│   ├── real-scenario-v3.js # 20 场景 202 步终测套件 (核心验证工具)
+│   ├── real-scenario-v3.js # 20 场景约 200 步终测套件 (核心验证工具)
 │   ├── real-scenario-v4.js # 复杂真实情景套件 (真实站 + SPA)
-│   ├── smoke-test.js       # 端到端冒烟测试 (94 项)
+│   ├── smoke-test.js       # 端到端冒烟测试 (项数以运行输出为准)
 │   └── package.js          # 发布打包 (dist/*.zip)
-├── data/                 # 审计历史 (history.jsonl, 运行时生成)
-├── dist/                 # 发布产物
+├── semantic/             # 语义提取/检索/定位真源 (生成 extension/injected/)
+├── skills/               # agent 子技能指南 (browser-ops / semantic-locating / troubleshooting 等)
+├── docs/                 # 文档与演示资产 (Pages 落地页 / 审计样例 / 发布说明 / promo 物料)
 ├── legacy/               # 历史脚本归档 (不再使用)
-├── reports/
-│   ├── real-scenario-v3.md # 最新终测报告 (测试时自动生成)
-│   └── archive/            # 历史报告/截图归档
 ├── ark.js                # 快捷别名 (转发 browser-client)
 ├── start.bat             # Windows 启动脚本
 ├── start.sh              # macOS/Linux 启动脚本
-├── SKILL.md              # AI 能力手册 (v10.2: 视觉优先; 也可作为 skill 独立安装)
+├── SKILL.md              # AI 能力手册 (v10.2: 视觉优先; 技能目录以入口卡指向本仓)
 ├── LICENSE
 ├── CHANGELOG.md
 └── README.md
@@ -279,9 +275,8 @@ ark-web/
 
 ## 上手与验证
 
-- **产品使用说明书**：`docs/产品使用说明书.md`（安装四步、日常使用、设置逐条、常见问题、运维速查、附录）
-  —— 改完文档跑 `node scripts/build-docs.js` 会生成 `docs/index.html`（双击即可看的单文件版，可直接打印）
-- **一键验证**：`node scripts/verify-all.js`（按"需要什么条件"分层；缺条件的会明确跳过并给补齐命令）
+- **文档渲染**：`node scripts/build-docs.js` 把 Markdown 渲染成自包含单文件 HTML（默认 `README.md` → `docs/README.html`，可 `--in=`/`--out=` 指定；双击即可看，可直接打印）；`docs/index.html` 是 GitHub Pages 手写落地页，不由该脚本生成
+- **一键验证**：`node scripts/verify-all.js`（按"需要什么条件"分层；缺条件的会明确跳过并给补齐命令。注意：本仓 `verify/` 目录未提交，见 `CHANGELOG.md` 已知缺口——未补齐时运行时 2 项会失败）
 - **打包发版**：`node scripts/bump-version.js <版本>` 统一版本 → `node scripts/package.js` 产出 `dist/`
 
 ## 已知限制与技术债
@@ -304,15 +299,15 @@ node scripts/package.js
 | 问题 | 解决 |
 |------|------|
 | `401: 缺少或错误的访问令牌` | HTTP 调用没带令牌。令牌在 **`~/.ark-web/token`**（Windows `Get-Content "$env:USERPROFILE\.ark-web\token" -Raw`）；**或直接用 CLI**（自动读取，永不 401） |
-| **`connected: true` 但命令全部超时** | **僵尸连接**（插件重载/浏览器休眠后残留的旧 WS）。v2.9.1 已内建自愈：超时自动换连接重试(8s) + 120s 静默自动清理 + `/status.connections[]` 可观测(`suspect:true` 即可疑)。仍不行就重启 server |
+| **`connected: true` 但命令全部超时** | **僵尸连接**（插件重载/浏览器休眠后残留的旧 WS）。v2.9.2 已内建自愈：超时自动换连接重试(8s) + 120s 静默自动清理 + `/status.connections[]` 可观测(`suspect:true` 即可疑)。仍不行就重启 server |
 | `connected: false` | 浏览器未开 / 插件未加载 → `chrome://extensions` 重新加载；夸克用户同理（夸克也支持加载解压扩展） |
 | 命令报 unknown/error | 插件是旧版 → `node scripts/sync.js --yes` 同步后 `POST /reload-extension`（或手动重载插件） |
 | 调试功能报"需要 CDP" | `node client/browser-client.js debug-on`（等价 `POST /debug/attach-all`，无需点 popup）；插件重载后需重新授权 |
 | 插件版本与代码不一致 | `node scripts/doctor.js` —— 会列出所有副本、浏览器实际加载路径、插件上报版本 |
 | 端口占用 `localhost:9333` | 结束占用进程, 或换端口启动: `$env:BRIDGE_PORT=9335; node server\bridge-server.js`（改了 WS 端口需在插件 popup 填同值） |
-| 夸克下个别 CDP 域不生效 | 已知差异（如 `setLocaleOverride` 被忽略，已用脚本注入兜底）；截图超时已加 `fromSurface:false` 兜底。device clear 视口残留已改为"写回原始视口"软还原。详见 `references/troubleshooting.md` |
-| 截图超时 | 整屏快照已改走渲染进程出图（~0.5s）；带 `clip` 的 `zoom`/元素截图受内核限制，会自动降级并返回 `degraded` |
-| `wait-for-load` 返回 `partial:true` | 正常：页面第三方资源挂起（被墙/慢请求）导致 `load` 永不触发，v3.0.1 起超 `stallGrace`(默认 3s) 即按 DOM 就绪返回，可继续操作；确需等完整 load 可调大 `timeout` |
+| 夸克下个别 CDP 域不生效 | 已知差异（如 `setLocaleOverride` 被忽略，已用脚本注入兜底）；后台标签页截图已按夸克实测修正（首轮超时 1.5s + 最多 3 次重试，实测 10/10 成功）。device clear 视口残留已改为"写回原始视口"软还原。详见 `references/troubleshooting.md` |
+| 后台标签页截图慢/曾失败 | 已修复：夸克下首轮取帧可能超时（`fromSurface:false` 被内核拒绝），现为首轮 1.5s + 最多 3 次重试，实测 10/10 成功、平均 3.2s；失败时响应里的 `cdpError` 会带每次尝试的真实错误。带 `clip` 的 `zoom`/元素截图受内核限制，会自动降级并返回 `degraded` |
+| `wait-for-load` 返回 `partial:true` | 正常：页面第三方资源挂起（被墙/慢请求）导致 `load` 永不触发，v2.9.3 起超 `stallGrace`(默认 3s) 即按 DOM 就绪返回，可继续操作；确需等完整 load 可调大 `timeout` |
 | 页面一直 loading / 卡 interactive | 通常是有挂起的外部资源（如国内网络下的 `cse.google.com`）→ `wait-for-load` 会自动部分返回；也可 `reload` 后重试 |
 
 ## 安全
@@ -325,7 +320,7 @@ node scripts/package.js
 | 令牌鉴权 | 除 `GET /health` 外所有端点都要求 `X-Ark-Token` 头（或 `Authorization: Bearer`、`?token=`）。令牌首次启动自动生成写入 **`~/.ark-web/token`**(0600)，启动日志与 `/health` 都会给出路径；CLI 与测试脚本自动读取。多份项目副本共用同一令牌，避免"服务端与 CLI 令牌不一致"的 401 |
 | Host 校验 | 拒绝非回环 Host → 挡 **DNS rebinding**（恶意域名解析到 127.0.0.1 后带自己的 Host 发请求） |
 | Origin 校验 + 精确 CORS | 仅接受无 Origin(CLI)、`chrome-extension://` 扩展页面、本机页面来源；回显具体 Origin，**不再使用 `Access-Control-Allow-Origin: *`** → 挡**任意网页 CSRF 操控浏览器** |
-| WS 来源校验 | **默认开启**：WebSocket 握手不受 CORS 约束，任意网页都能向 `ws://127.0.0.1:9334` 发起连接，因此默认拒绝一切 `http(s)://` 来源，只接受扩展页面与无 Origin 的本机进程。确需让本机页面走 WS 的老用法：`ARK_WS_ALLOW_LOCAL=1`（验证见 `verify/ws-guard.js`） |
+| WS 来源校验 | **默认开启**：WebSocket 握手不受 CORS 约束，任意网页都能向 `ws://127.0.0.1:9334` 发起连接，因此默认拒绝一切 `http(s)://` 来源，只接受扩展页面与无 Origin 的本机进程。确需让本机页面走 WS 的老用法：`ARK_WS_ALLOW_LOCAL=1`（安全加固记录见 `CHANGELOG.md`） |
 | WS 令牌 | 设置 `ARK_TOKEN`(或 `ARK_WS_TOKEN`) 后，插件必须在 popup「连接配置」填入相同令牌，否则连接被拒 → 挡本机任意进程直连 9334 绕过 HTTP 鉴权 |
 
 ```bash

@@ -57,11 +57,11 @@ node client\browser-client.js status                        # ② 需令牌但 C
 node client\browser-client.js tabs                          # ③ 能列出标签页即完全可用
 ```
 
-`/health` 返回示例（**新接入的 AI 先读它，就知道该用什么命令、令牌在哪**）：
+`/health` 返回示例（**新接入的 AI 先读它，就知道该用什么命令、令牌在哪**；`cli` 实际输出当前运行 server 的绝对路径，会随部署位置变化，以下仅为示例）：
 
 ```json
 { "ok": true, "connected": true,
-  "cli": "C:\\Users\\<你>\\.agents\\skills\\ark-web\\client\\browser-client.js",
+  "cli": "<运行中 server 的绝对路径>\\client\\browser-client.js",
   "tokenFile": "C:\\Users\\<你>\\.ark-web\\token", "tokenHeader": "X-Ark-Token",
   "usage": { "preferred": "node \"...\\browser-client.js\" status   (CLI 会自动读取令牌, 推荐)" } }
 ```
@@ -292,7 +292,7 @@ curl.exe -H "X-Ark-Token: $(Get-Content "$env:USERPROFILE\.ark-web\token" -Raw)"
 
 ## 8. 故障排查
 
-常见症状与处置见 `references/troubleshooting.md`（连接/僵尸连接/鉴权/CDP/夸克内核差异/点击无效/拖拽/中文编码/限流登录墙/弹窗 等 30 条）。
+常见症状与处置见 `references/troubleshooting.md`（连接/僵尸连接/鉴权/CDP/夸克内核差异/点击无效/拖拽/中文编码/限流登录墙/弹窗 等 50+ 条）。
 
 ## 参考文档
 

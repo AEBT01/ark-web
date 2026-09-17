@@ -1,5 +1,7 @@
 # ark-web v3.0.2 — 中文宣发包
 
+> 历史物料：v2.8–v3.0 初期的发布稿。安全模型（现已全面令牌鉴权）与端点数（现 154）已有变更，现行口径见 SKILL.md 与 README.md。
+
 > 仓库：https://github.com/AEBT01/ark-web · 文档站：https://aebt01.github.io/ark-web/ · MIT 协议 · v3.0.2（新增英文 README + Pages 站，核心功能不变——不确定的以仓库为准）
 
 ---

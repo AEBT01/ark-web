@@ -1,5 +1,7 @@
 # ark-web v3.0.2 — Launch Pack (EN)
 
+> Historical material: release copy from the v2.8–v3.0 era. The security model (now token-authenticated on all endpoints except `GET /health`) and endpoint count (now 154) have changed — see SKILL.md and README.md for the current state.
+
 > Repo: https://github.com/AEBT01/ark-web · Docs site: https://aebt01.github.io/ark-web/ · License: MIT · Version: v3.0.2 (English README + Pages site; core unchanged — details per repo)
 
 ---

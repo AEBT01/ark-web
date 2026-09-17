@@ -107,7 +107,7 @@
 `POST /reset-all?tabId=` — 一键恢复 15 项（设备/媒体/geo/时区/语言/CPU/JS/并发/网络/CSP/缓存/暗色/高亮/弹窗策略/滚动 + **视觉残留**），幂等
 
 ### 基础
-`GET /health`（**免鉴权**，仅 `{ok, connected}`） · `GET /status`（含 `security` 段） · `GET /clear-cache`
+`GET /health`（**免鉴权**，自解释端点：`{ok, connected}` + `cli` 绝对路径 / `tokenFile` / `tokenHeader` / `usage` 推荐用法） · `GET /status`（含 `security` 段） · `GET /clear-cache`
 
 ---
 

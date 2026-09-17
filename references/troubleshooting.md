@@ -7,7 +7,7 @@
 | 症状 | 原因与解决 |
 |------|-----------|
 | `401: 缺少或错误的访问令牌` | 直接 HTTP 调用没带令牌。令牌在 **`~/.ark-web/token`**（Windows `%USERPROFILE%\.ark-web\token`）：`Get-Content "$env:USERPROFILE\.ark-web\token" -Raw`。带 `-H "X-Ark-Token: <令牌>"`；**或改用 CLI（自动读取，永不 401）** |
-| 文档里看到的 `server/.ark-token` | 那是**旧路径**（v2.9.0 之前）。现已统一为用户级共享令牌 `~/.ark-web/token`，多份项目副本共用同一个，避免服务端与 CLI 令牌不一致 |
+| 文档里看到的 `server/.ark-token` | 那是**旧路径**（v2.9.1 之前）。现已统一为用户级共享令牌 `~/.ark-web/token`，多份项目副本共用同一个，避免服务端与 CLI 令牌不一致 |
 | `403: 请求被安全策略拒绝(Host=... 非回环地址)` | 用了非回环 Host（局域网 IP / 域名）→ 改用 `127.0.0.1` 或 `localhost`；确需外部访问要设 `BRIDGE_HOST=0.0.0.0` **且** `ARK_TOKEN` |
 | `403: ... Origin=... 不被信任` | 从第三方网页发起调用被拦（设计如此，防 CSRF）→ 用 CLI/curl 或本机页面 |
 | `插件未连接` / `connected: false` | ① 浏览器没开；② 插件没加载（`chrome://extensions` → 加载 `extension/`）；③ 插件 popup 显示未连接 |
@@ -22,7 +22,7 @@
 
 **原因**：插件重载（或浏览器睡眠/唤醒）后，**旧的 WebSocket 连接仍留在 server 的 clients 里且 `readyState=OPEN`，但那个旧实例已不再处理消息**。server 按"版本最高"选连接时若选中僵尸，命令就石沉大海。
 
-**已内建的自愈（v2.9.1）**：
+**已内建的自愈（v2.9.2）**：
 
 1. **超时自动换连接重试** —— 多连接时首个连接只用 8s 探测超时，超时立刻换下一个连接重试；
 2. **心跳清理** —— 每 15s 发 ping，连接静默 >120s 直接 terminate 并移出；

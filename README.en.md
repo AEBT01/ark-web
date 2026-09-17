@@ -2,14 +2,12 @@
 
 > Control your **real** Chrome from AI: Chrome MV3 extension + Node Bridge — 154 endpoints, snapshot/SoM vision, session isolation, audit engine.
 
-[![version](https://img.shields.io/badge/version-v3.0.2-blue)](https://github.com/AEBT01/ark-web)
+![version](https://img.shields.io/badge/version-v3.0.2-blue)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![stars](https://img.shields.io/github/stars/AEBT01/ark-web?style=social)](https://github.com/AEBT01/ark-web)
-[![last-commit](https://img.shields.io/github/last-commit/AEBT01/ark-web)](https://github.com/AEBT01/ark-web/commits)
 
 **Ark Web** is a local bridge that lets AI agents drive the browser you actually use — with your logins, cookies, and real fingerprint. No Puppeteer, no throwaway Chromium. An MV3 extension (CDP via `chrome.debugger`) talks over WebSocket (`:9334`) to a local Node bridge exposing **154 HTTP endpoints** (`:9333`): navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced **session isolation** for parallel agents, and a 30+ rule weighted **audit engine** (performance / a11y / SEO / security / resources).
 
-AI agents: load `SKILL.md` — the unified manual with a self-gating step (multimodal → vision workflow with snapshot + coordinates; text-only → selector workflow).
+AI agents: load `SKILL.md` — a vision-first single-path manual: take a snapshot, then act on numbered elements (`clickRef`/`fillRef`) instead of guessing selectors.
 
 ## Why real browser?
 
@@ -39,10 +37,12 @@ AI agents: load `SKILL.md` — the unified manual with a self-gating step (multi
 cd server && npm install && node bridge-server.js
 # Windows: start.bat   macOS/Linux: ./start.sh
 
-# 3. Verify
-curl http://localhost:9333/status
-curl -X POST http://localhost:9333/open -d '{"url":"https://example.com"}'
-curl "http://localhost:9333/snapshot?annotate=1"
+# 3. Verify (only GET /health is unauthenticated; all other endpoints need the token)
+curl http://localhost:9333/health
+TOKEN=$(cat ~/.ark-web/token)   # auto-generated on first start
+curl -H "X-Ark-Token: $TOKEN" http://localhost:9333/status
+curl -H "X-Ark-Token: $TOKEN" -X POST http://localhost:9333/open -d '{"url":"https://example.com"}'
+curl -H "X-Ark-Token: $TOKEN" "http://localhost:9333/snapshot?annotate=1"
 ```
 
 CLI alternative:
@@ -52,7 +52,7 @@ node client/browser-client.js status
 node client/browser-client.js open https://example.com
 ```
 
-> Windows PowerShell: prefer `Invoke-RestMethod` over `curl.exe` for JSON bodies. Port via env: `BRIDGE_PORT=9335` (HTTP only — keep WS `9334` unless you also patch `background.js`).
+> Windows PowerShell: prefer `Invoke-RestMethod` over `curl.exe` for JSON bodies. Ports: HTTP via `BRIDGE_PORT`; WS host/port/token are editable in the extension popup → Tools → Connection Config (server reads `BRIDGE_WS_PORT`).
 
 ## CLI examples
 
@@ -105,7 +105,7 @@ curl -X POST http://localhost:9333/batch -d '{"steps":[
 
 ```
 ark-web/
-├── extension/            # Chrome MV3 plugin (manifest v2.8.2, background CDP + audit capture, content monitor, popup auth)
+├── extension/            # Chrome MV3 plugin (manifest v3.0.2, background CDP + audit capture, content monitor, popup auth)
 ├── server/
 │   ├── bridge-server.js  # HTTP API (154) + WebSocket bridge + cache/keep-alive/per-tab queues
 │   ├── audit.js          # audit engine: scoring/insights/opportunities/budgets
@@ -115,18 +115,18 @@ ark-web/
 │   └── ark-fast.js       # ArkFast SDK (snapshot/click/clickText/fill/extract/act/batch)
 ├── scripts/
 │   ├── check-endpoints.js# endpoint declaration consistency check
-│   ├── real-scenario-v3.js # 20 scenarios / 202 steps core suite
+│   ├── real-scenario-v3.js # 20 scenarios / about 200 steps core suite
 │   ├── real-scenario-v4.js # 12 complex real-world scenarios
-│   └── smoke-test.js     # 95-item end-to-end smoke test
-├── SKILL.md              # AI manual (unified v9: text+vision, model self-gate)
-├── CHANGELOG.md          # full version history (current v2.8.2)
+│   └── smoke-test.js     # end-to-end smoke test (item count from run output)
+├── SKILL.md              # AI manual (v3.0.2, vision-first)
+├── CHANGELOG.md          # full version history (current v3.0.2; the VERSION file is the source of truth)
 ├── start.bat / start.sh  # Windows / macOS+Linux launchers
 └── ark.js                # shortcut alias → browser-client
 ```
 
 ## Security note
 
-Local debug tool: binds **localhost**, **no authentication** by design. Any local process can fully drive your browser. Do **not** expose the port, do not run on shared/untrusted machines. Recommendation: bind explicitly to loopback (`127.0.0.1`) and firewall the bridge ports (`9333` HTTP / `9334` WS); change HTTP port with `BRIDGE_PORT` if anything else occupies it.
+Local debug tool: binds **loopback only** and **requires a token on every endpoint except `GET /health`**. The token is auto-generated at `~/.ark-web/token` (0600); send it as `X-Ark-Token` (the CLI reads it automatically). Host/Origin validation is on by default. Do **not** expose the port, do not run on shared/untrusted machines; firewall `9333` (HTTP) / `9334` (WS) and change the HTTP port with `BRIDGE_PORT` if it is occupied.
 
 ## 中文简介（第二语言节）
 
@@ -141,8 +141,8 @@ Local debug tool: binds **localhost**, **no authentication** by design. Any loca
 （用 `node client/browser-client.js` 会自动读取，永不 401）。服务默认**只绑定回环地址**，
 并叠加 Host / Origin 校验 —— 不要把它暴露到局域网或公网。
 
-Agent 用法：让它读本仓库的 `SKILL.md`（v3.0.2 起为视觉优先的单一手册）；若希望按技能名自动发现，
-可把本仓库（或其子集）复制到 agent 的技能目录（例如 `%USERPROFILE%\.agents\skills\ark-web\`）。
+Agent 用法：让它读本仓库的 `SKILL.md`（v3.0.2 起为视觉优先的单一手册）。技能目录（如
+`%USERPROFILE%\.agents\skills\ark-web\`）只放一张指向本仓的入口卡；完整手册与运行体都在本仓，就地使用。
 完整中文文档见 `README.md`，版本历史见 `CHANGELOG.md`。
 
 ## License
