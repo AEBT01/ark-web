@@ -1,4 +1,4 @@
----
+﻿---
 name: ark-web
 description: 视觉优先的浏览器操控技能。通过浏览器扩展 + 本机 Bridge Server 真实操控 Chrome/夸克等 Chromium 浏览器：截图理解页面、按编号直接点击/填表、放大读小字、视觉 QA、性能审计、数据抓取、多标签并行。当需要打开网页、点击、填表、截图、抓取页面数据、测试网页、排查页面问题、做性能/可访问性审计时使用。
 ---
@@ -156,6 +156,7 @@ POST /mouse { "type": "click", "x": 668, "y": 430 }
 1. GET  /health 或 /status        # 连接确认
 2. POST /open {url}               # 或 {url, current:true} 复用当前标签页
 3. POST /wait-for-load            # 事件驱动, 别用 sleep; 页面有挂起资源时提前返回 partial:true(正常, 可继续); 再 POST /wait-for-stable 等 DOM 静默
+                                  # SPA / 数据驱动页面: 可加 POST /wait-for-idle {idleTime:500} 等网络真正空闲(比固定 sleep 稳)
 4. GET  /snapshot?annotate=1&compact=1&format=webp   # ← 看图决策
 5. POST /act {action:"clickRef", ref:N, waitFor:"load"}
 6. GET  /snapshot?compact=1       # ← 前后对比验证(或 readText 校值)
@@ -194,7 +195,7 @@ node client\browser-client.js chain "open https://example.com" "wait-load" "wait
 
 > 注意：**带 clip 的截图（`zoom` / `screenshot-element`）必须由合成器出图**，窗口最小化时可能超时（会返回 `degraded` 并降级为元素截图）；`/snapshot` 整屏截图已改用渲染进程出图（实测 ~0.5s）。
 
-## 2. 能力速查（154 端点）
+## 2. 能力速查（155 端点）
 
 **⚡ = 需 CDP 调试授权**（未启用时自动降级为脚本模拟）
 

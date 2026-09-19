@@ -69,6 +69,7 @@ module.exports = [
   "POST /snapshot/zoom {ref|selector|x,y,width,height,scale,format,quality} (裁剪放大读小字)",
   "POST /snapshot/text {minLen,max} (可见文本块+紧致坐标, 免截图读页面)",
   "POST /wait-for-stable {timeout,quiet} (等 DOM 稳定, 替代固定 sleep)",
+  "POST /wait-for-idle {timeout,idleTime,ignoreTypes,ignoreUrls} (等网络空闲, networkidle 等价物)",
   "POST /reload-extension (重载插件代码; 重载后需重新「启用调试」)",
   "POST /fast/act {action,selector,text,fields,url,fast}",
   "POST /act {action,...}",

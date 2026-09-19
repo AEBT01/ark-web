@@ -35,7 +35,7 @@ const est = (n) => '~' + Math.round(n / 3.6) + ' tok';   // 粗估: 1 token ≈ 
     if (r.error || r.success === false) { rows.push({ label: c.label, error: r.error || 'failed' }); continue; }
     const els = JSON.stringify(r.elements || []).length;
     const img = (r.dataUrl || '').length;
-    rows.push({ label: c.label, n: (r.elements || []).length, els, img, ms, fmt: r.format, compact: r.elementsFormat === 'compact' });
+    rows.push({ label: c.label, n: (r.elements || []).length, els, img, ms, fmt: r.format, requested: r.requestedFormat || null, note: r.formatNote || null, compact: r.elementsFormat === 'compact' });
   }
 
   // 缓存命中(snapshot 400ms 缓存)
@@ -54,17 +54,23 @@ const est = (n) => '~' + Math.round(n / 3.6) + ' tok';   // 粗估: 1 token ≈ 
   console.log('方式'.padEnd(16) + '元素'.padStart(5) + '  元素JSON'.padStart(11) + '  估算token'.padStart(11) + '  图片base64'.padStart(12) + '  耗时'.padStart(9));
   console.log('-'.repeat(72));
   for (const r of rows) {
+    if (r.error) {
+      // 不再把失败行打印成 NaN：失败原因直接列出来，便于区分"环境抖动"与"功能坏了"
+      console.log(r.label.padEnd(16) + '  采集失败: ' + String(r.error).slice(0, 90));
+      continue;
+    }
     console.log(
       r.label.padEnd(16) +
       String(r.n).padStart(5) + '  ' +
       kb(r.els).padStart(11) + '  ' +
       est(r.els).padStart(11) + '  ' +
       kb(r.img).padStart(12) + '  ' +
-      (r.ms + 'ms').padStart(9)
+      (r.ms + 'ms').padStart(9) +
+      (r.note ? '  [' + r.note + ']' : '')
     );
   }
-  const obj = rows.find(r => r.label === '对象格式 png');
-  const cmp = rows.find(r => r.label === '紧凑格式 webp');
+  const obj = rows.find(r => r.label === '对象格式 png' && !r.error);
+  const cmp = rows.find(r => r.label === '紧凑格式 webp' && !r.error);
   if (obj && cmp) {
     const elsSave = (1 - cmp.els / obj.els) * 100;
     const imgSave = (1 - cmp.img / obj.img) * 100;

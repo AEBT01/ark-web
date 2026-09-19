@@ -16,6 +16,7 @@
 | `POST /tab/activate {tabId}` `/tab/close {tabId}` | 激活/关闭 |
 | `POST /wait-for-load` `/wait-for-url` `/wait-for-text` | 事件驱动等待（10-40ms 响应）。`wait-for-load` 会识别"刚发生过导航"，不再把旧文档的 complete 当成加载完成（`afterAction`/`_pendingNav` 机制）。**v2.9.3**：页面第三方资源挂起（`load` 永不触发）时，DOM 就绪超 `stallGrace`(默认 3000ms) 即返回 `{success:true, partial:true, readyState:'interactive', note}`；服务端 cmd 超时跟随 body 的 `timeout`(+5s 余量) |
 | `POST /wait-for-stable {timeout,quiet}` | 等 DOM 连续静默 `quiet` 毫秒（默认 500）且 `readyState=complete`，替代固定 sleep |
+| `POST /wait-for-idle {timeout,idleTime,ignoreTypes,ignoreUrls}` | 等网络空闲（`networkidle` 等价物）：连续 `idleTime`（默认 500ms）无"进行中请求"且 `readyState=complete`。默认排除 `websocket`/`eventsource`；`ignoreUrls` 按子串排除。与 `wait-for-stable` 分工：idle 看网络（数据层），stable 看 DOM（渲染层），SPA 先 idle 再 stable 最稳 |
 | `POST /reload-extension` | 让浏览器重载插件代码（自我更新）；重载后 CDP 授权失效，需重跑 `POST /debug/attach-all` |
 | `POST /batch {steps:[{type,data}]}` | 一次往返执行多步 |
 

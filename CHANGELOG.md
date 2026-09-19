@@ -3,6 +3,59 @@
 版本号以仓库根目录的 `VERSION` 为唯一来源，由 `node scripts/bump-version.js <版本>` 同步到
 扩展清单与服务端 package.json（两处不一致时打包会拒绝执行）。
 
+## 未发布 — 实机回归修复 + 网络空闲等待（2026-09-20）
+
+> 在夸克（QuarkPC 7.2 / Chromium 144）上跑全量实机验证（smoke + v3 + v4）挖出的问题，
+> 逐条修复并留下前后对比；顺带补一个长期缺失的等待原语。
+
+### 修复：快照谎报图片格式（webp 实际是 jpeg）
+
+- 窗口最小化/不可见时 CDP 截图失败，兜底走 `captureVisibleTab`——它**只支持 png/jpeg**，
+  webp 会被降级成 jpeg，但响应里 `format` 仍回传请求的 `webp`。调用方按 webp 的体积/质量
+  预期去理解一张 jpeg，属于静默错误。
+- 现在 `format` 以实际出图为准，降级时额外回传 `requestedFormat` 与 `formatNote`。
+  实测（最小化窗口）：`format=jpeg, requestedFormat=webp, formatNote=captureVisibleTab 不支持 webp…`。
+
+### 修复：连续截图撞 `captureVisibleTab` 配额，直接失败
+
+- Chrome 对 `captureVisibleTab` 限「每秒最多 2 次」，超限抛
+  `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND`。窗口不可见时这条兜底是唯一通路，
+  连拍第 3 张起必然失败（基准脚本 4 连拍实测 2/4 失败）。
+- 现在识别配额错误后等一拍重试一次。实测连拍 **6/6 成功**（修复前约 50% 失败）。
+
+### 修复：测试脚本自身的三处过时/缺陷
+
+- `smoke-test.js` 断言插件版本写死 `/^2\./`，插件升到 3.x 后必然假失败 →
+  改为"形如 x.y.z 且与仓库 VERSION 同主版本"。
+- `real-scenario-v3.js` 上传用例把文件写在 `reports/`，而 `/upload` 已强制文件沙箱
+  （仅 `~/.ark-web/workspace`）→ 必然报 `path-outside-workspace`。改用沙箱路径。
+- `benchmark.js` / `bench-snapshot.js` 跑完不退出（keep-alive agent 持有空闲 socket）→
+  显式销毁 agent 并给出明确出口；基准里的失败行不再打印成 `NaN`，改为列出真实原因。
+
+### 修复：`verify-all.js` 把"套件缺失"报成"代码失败"
+
+- `verify/*.js` 在本仓从未提交（见「已知缺口」），直接跑得到一堆 `MODULE_NOT_FOUND`，
+  看起来像代码坏了。现在套件文件不存在时按既定口径**跳过并给出补齐位置**。
+- 顺带修 Windows 下 `/tmp/ark-mock.log` 的硬编码（改用 `~/.ark-web/mock.log`）。
+
+### 新增：`POST /wait-for-idle` —— 网络空闲等待（networkidle 等价物）
+
+- 判据：连续 `idleTime`（默认 500ms）内"进行中请求数"为 0，且 `readyState === 'complete'`。
+  排除 `websocket`/`eventsource` 长连接（可用 `ignoreTypes` 改），另支持 `ignoreUrls` 按子串排除。
+  （注：不要按"发起时间"过滤在途请求——导航请求往往早于调用 1ms，过滤会让等待立刻返回；
+  实测踩过，已改为不过滤，挂死请求由 timeout 兜底并如实报错。）
+- 与 `/wait-for-stable` 的分工：stable 看 DOM 是否还在变（渲染层），idle 看网络是否还在请求
+  （数据层）；SPA「先请求后渲染」场景先 idle 再 stable 最稳。长轮询站点可用 `ignoreTypes` 排除。
+- 配套补齐 `webRequest.onErrorOccurred` 监听：此前失败/被取消的请求永远留在"进行中"，
+  空闲判定对任何有失败请求的页面都会超时（被墙站点必现）。
+
+### 性能
+
+- `/type` 聚焦后的固定 60ms 盲等 → 40ms（实测中位 **63.9ms → 45.7ms，-28%**）。
+  注：中途试过"等两帧 rAF"，但窗口最小化时 CDP evaluate 会超时并回退到 `executeScript`（3s 上限），
+  反而把 60ms 变成 170ms+；已回退为本地固定延时。
+- 端点总数 154 → **155**（新增 `/wait-for-idle`）。
+
 ## 未发布 — 项目归属清理（2026-09-17）
 
 > 背景：本仓与另一个独立项目「Ark BrowserOS」（深改浏览器 + opencode 侧边栏）曾共用

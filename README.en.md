@@ -1,11 +1,11 @@
-# Ark Web
+﻿# Ark Web
 
-> Control your **real** Chrome from AI: Chrome MV3 extension + Node Bridge — 154 endpoints, snapshot/SoM vision, session isolation, audit engine.
+> Control your **real** Chrome from AI: Chrome MV3 extension + Node Bridge — 155 endpoints, snapshot/SoM vision, session isolation, audit engine.
 
 ![version](https://img.shields.io/badge/version-v3.0.2-blue)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Ark Web** is a local bridge that lets AI agents drive the browser you actually use — with your logins, cookies, and real fingerprint. No Puppeteer, no throwaway Chromium. An MV3 extension (CDP via `chrome.debugger`) talks over WebSocket (`:9334`) to a local Node bridge exposing **154 HTTP endpoints** (`:9333`): navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced **session isolation** for parallel agents, and a 30+ rule weighted **audit engine** (performance / a11y / SEO / security / resources).
+**Ark Web** is a local bridge that lets AI agents drive the browser you actually use — with your logins, cookies, and real fingerprint. No Puppeteer, no throwaway Chromium. An MV3 extension (CDP via `chrome.debugger`) talks over WebSocket (`:9334`) to a local Node bridge exposing **155 HTTP endpoints** (`:9333`): navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced **session isolation** for parallel agents, and a 30+ rule weighted **audit engine** (performance / a11y / SEO / security / resources).
 
 AI agents: load `SKILL.md` — a vision-first single-path manual: take a snapshot, then act on numbered elements (`clickRef`/`fillRef`) instead of guessing selectors.
 
@@ -20,7 +20,7 @@ AI agents: load `SKILL.md` — a vision-first single-path manual: take a snapsho
 ## Features
 
 - **Snapshot / SoM vision** — `GET /snapshot` (JSON: `dataUrl` + anchors), `GET /snapshot/binary` (raw `image/png`, saves ~33% base64), `POST /act` (one-HTTP high-level intent: `snapshot`/`click`/`clickText`/`fill`/`type`/`extract`/`navigate`).
-- **154 endpoints** — navigation, click/hover/drag/scroll, type/fill/select/check, evaluate, wait-for (selector/text/url/load), screenshots (viewport/full/element), PDF, cookies/storage, console, DOM-changes, frames/layout, dialogs. Source of truth: `scripts/check-endpoints.js`.
+- **155 endpoints** — navigation, click/hover/drag/scroll, type/fill/select/check, evaluate, wait-for (selector/text/url/load), screenshots (viewport/full/element), PDF, cookies/storage, console, DOM-changes, frames/layout, dialogs. Source of truth: `scripts/check-endpoints.js`.
 - **Session isolation** — AsyncLocalStorage tab routing; `?session=` / `?tabId=` on every endpoint; per-tab queues (writes serial, reads parallel); audit-run captures and replays ALS context so queued audits never hijack your active tab.
 - **Audit engine** — `POST /audit`: 30+ dimensions (Web Vitals, long tasks, resource waterfall, images/fonts, framework detection, DOM complexity, security headers), 5 weighted category scores (0–100), deterministic root-cause insights + ROI-ranked opportunities; HTML single-file report + Markdown + compact AI format; JSONL history, before/after diff, async batch queue, performance budgets.
 - **Batch / chain** — `POST /batch` DAG (`_parallel` read blocks run `Promise.all`, 3–5× faster); CLI `chain "open …" "wait-load" "page-info" "screenshot shot.png"` in one HTTP+WS round trip; `POST /act` saves one RTT vs client-side snapshot→mouse.
@@ -92,7 +92,7 @@ curl -X POST http://localhost:9333/batch -d '{"steps":[
 
 |  | real browser? | protocol | MCP | visual (SoM) | session isolation | audit engine | best for |
 |---|---|---|---|---|---|---|---|
-| **ark-web** | ✅ your Chrome (CDP trusted input) | HTTP 154 + WS bridge | via bridge/CLI | ✅ atomic snapshot+anchors+binary | ✅ server-enforced per-tab/session | ✅ 30+ dims, scored, reports+trends | AI driving a lived-in browser + perf audits |
+| **ark-web** | ✅ your Chrome (CDP trusted input) | HTTP 155 + WS bridge | via bridge/CLI | ✅ atomic snapshot+anchors+binary | ✅ server-enforced per-tab/session | ✅ 30+ dims, scored, reports+trends | AI driving a lived-in browser + perf audits |
 | **browser-use** | ⚠️ drives own Chromium | Python lib | ❌ | ⚠️ screenshot + model grounding | ⚠️ manual contexts | ❌ | scripted agent loops in fresh profiles |
 | **playwright-mcp** | ⚠️ Playwright-managed browser | MCP over Playwright | ✅ | ⚠️ snapshot (a11y tree), no SoM coords | ⚠️ contexts | ❌ | MCP clients needing Playwright actions |
 | **chrome-devtools-mcp** | ✅ local Chrome via CDP | MCP | ✅ | ⚠️ screenshot, no anchor map | ❌ single target | ⚠️ perf traces only | DevTools power users inside MCP |
@@ -107,7 +107,7 @@ curl -X POST http://localhost:9333/batch -d '{"steps":[
 ark-web/
 ├── extension/            # Chrome MV3 plugin (manifest v3.0.2, background CDP + audit capture, content monitor, popup auth)
 ├── server/
-│   ├── bridge-server.js  # HTTP API (154) + WebSocket bridge + cache/keep-alive/per-tab queues
+│   ├── bridge-server.js  # HTTP API (155) + WebSocket bridge + cache/keep-alive/per-tab queues
 │   ├── audit.js          # audit engine: scoring/insights/opportunities/budgets
 │   └── audit-report.js   # report rendering + trend store + batch queue
 ├── client/

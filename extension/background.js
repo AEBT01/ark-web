@@ -533,6 +533,12 @@ class ArkWeb {
         (d) => this.onRequestCompleted(d),
         { urls: ['<all_urls>'] }
       );
+      // 必须也监听失败请求：没有它，被墙/取消/失败的请求永远不会离开"进行中"，
+      // 网络空闲判定就会一直等到超时（实测被墙站点必现）。
+      chrome.webRequest.onErrorOccurred.addListener(
+        (d) => this.onRequestFailed(d),
+        { urls: ['<all_urls>'] }
+      );
     }
 
     chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -959,6 +965,7 @@ class ArkWeb {
       case 'wait-for-url': return this.waitForUrl(tabId, data);
       case 'wait-for-load': return this.waitForLoad(tabId, data);
       case 'wait-for-stable': return this.waitForStable(tabId, data);
+      case 'wait-for-idle': return this.waitForNetworkIdle(tabId, data);
 
       // ---------- 截图 / PDF ----------
       case 'screenshot': return this.screenshot(tabId, data);
@@ -2010,7 +2017,11 @@ class ArkWeb {
         return true;
       }, [selector]);
       if (!ok) return { error: `Element not found: ${selector}` };
-      await new Promise(r => setTimeout(r, 60));
+      // 聚焦/滚动提交后需要一个短窗口让渲染线程就绪再注入输入。
+      // 注意：这里不能用 runInPage 内的 rAF 等待 —— 窗口最小化时 CDP evaluate 会超时，
+      // runInPage 会退到 executeScript（3s 上限）慢路径，反而把 60ms 变成 170ms+（实测）。
+      // 固定 40ms 的本地延时无往返开销，实测输入稳定（v3/v4 与 smoke 全绿）。
+      await new Promise(r => setTimeout(r, 40));
     }
     // throttled(授权窗口过期)时 CDP 输入约 5s/键, 直接走脚本输入避免慢路径
     if (tabId != null && !this.cdp.throttled && await this.cdp.tryAttach(tabId)) {
@@ -2030,9 +2041,12 @@ class ArkWeb {
             const c = await this.cdp.evaluate(tabId, `(() => { const el = document.querySelector(${JSON.stringify(selector)}); return el ? el.value : null; })()`).catch(() => null);
             return c?.result;
           };
+          const want = String(text);
+          // 两次读回：oldVal 用来区分"静默未写入"（值仍是旧值）与"正常追加/写入"。
+          // 判据必须保留 got === oldVal 这一项 —— 只比 got !== want 会把
+          // "字段已有内容、insertText 在其后追加"误判为损坏，从而错误改走脚本替换（改变语义）。
           const oldVal = await readVal();
           const got = await readVal();
-          const want = String(text);
           if (typeof got === 'string' && got !== want && (got.includes('?') || got === '' || got === oldVal)) {
             await this.runInPage(tabId, (sel, val) => {
               const el = document.querySelector(sel);
@@ -2503,10 +2517,25 @@ class ArkWeb {
     try {
       // captureVisibleTab 只接受 jpeg/png(webp 会直接抛参数错误) → 兜底路径降级为 jpeg
       const fbFormat = (format === 'jpeg' || format === 'png') ? format : 'jpeg';
-      const dataUrl = await Promise.race([
+      const captureOnce = () => Promise.race([
         chrome.tabs.captureVisibleTab(null, { format: fbFormat, quality }),
         new Promise((_, rej) => setTimeout(() => rej(new Error('captureVisibleTab timeout after 6000ms')), 6000))
       ]);
+      let dataUrl;
+      try {
+        dataUrl = await captureOnce();
+      } catch (e) {
+        // 配额限流：Chrome 对 captureVisibleTab 限制「每秒最多 2 次」，超限抛
+        // MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND。窗口不可见时这条兜底是唯一通路，
+        // 连拍（如基准脚本 4 连拍）第 3 张起必然撞限流 —— 实测直接失败。
+        // 等一拍再重试一次，把"连拍 50% 失败"变成稳定成功。
+        if (/MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND|quota/i.test(e.message || '')) {
+          await new Promise(r => setTimeout(r, 1100));
+          dataUrl = await captureOnce();
+        } else {
+          throw e;
+        }
+      }
       return { success: true, method: 'script', dataUrl, format: fbFormat, ...(fbFormat !== format ? { formatNote: `captureVisibleTab 不支持 ${format}, 已降级为 ${fbFormat}` } : {}), timestamp: Date.now() };
     } catch (e) {
       return { success: false, error: `截图失败(CDP 超时且 fallback 不可用, 可能窗口不可见): ${e.message}`, method: 'failed' };
@@ -2687,6 +2716,47 @@ class ArkWeb {
     return { success: false, error: 'timeout waiting for stable', mutations: lastMut || 0, waited: Date.now() - start };
   }
 
+  /**
+   * 等待网络空闲（Playwright networkidle 的等价物）。
+   * 判据：连续 idleTime 毫秒内"进行中请求数"为 0（排除 websocket/eventsource 这类长连接），
+   * 且 document.readyState === 'complete'。用于替代"加载后盲等固定秒数"。
+   *
+   * 与 wait-for-stable 的分工：stable 看 DOM 是否还在变（渲染层），idle 看网络是否还在请求（数据层）。
+   * 单页应用先发请求后渲染的场景，先 idle 再 stable 最稳。
+   */
+  async waitForNetworkIdle(tabId, data = {}) {
+    if (tabId == null) return { error: 'No active tab' };
+    const timeout = Math.min(Math.max(+(data.timeout || 20000), 1000), 300000);
+    const idleTime = Math.min(Math.max(+(data.idleTime || 500), 100), 10000);
+    const ignoreTypes = Array.isArray(data.ignoreTypes) ? data.ignoreTypes : ['websocket', 'eventsource'];
+    const ignoreUrls = Array.isArray(data.ignoreUrls) ? data.ignoreUrls : [];
+    const start = Date.now();
+    let lastBusy = start;
+    let peak = 0;
+    while (Date.now() - start < timeout) {
+      const pending = this.pendingRequestCount(tabId, { ignoreTypes, ignoreUrls });
+      peak = Math.max(peak, pending);
+      const r = await this.evaluateJS(tabId, { code: 'document.readyState', timeout: 3000 }).catch(() => null);
+      const ready = r?.success ? r.result : null;
+      if (pending === 0) {
+        if (ready === 'complete' && Date.now() - lastBusy >= idleTime) {
+          return { success: true, idleFor: Date.now() - lastBusy, peakPending: peak, waited: Date.now() - start };
+        }
+      } else {
+        lastBusy = Date.now();
+      }
+      await new Promise(r2 => setTimeout(r2, 100));
+    }
+    return {
+      success: false,
+      error: 'timeout waiting for network idle',
+      pending: this.pendingRequestCount(tabId, { ignoreTypes, ignoreUrls }),
+      peakPending: peak,
+      waited: Date.now() - start,
+      hint: '仍有请求未结束。若站点有长轮询/被墙资源，可调大 timeout，或用 ignoreTypes/ignoreUrls 排除。'
+    };
+  }
+
   /** 出错页/系统页守卫: chrome-error:// (拿不到站点时的错误页) 与 about:blank / chrome:// 页面
    *  的渲染进程状态异常, Runtime.evaluate 会一直挂到超时(实测 12s)。提前识别直接给可操作错误。 */
   async assertUsableTab(tabId) {
@@ -2858,10 +2928,16 @@ class ArkWeb {
     // 列顺序: ref, tag, role, x, y, w, h, flags, label
     // flags 字母含义: d=disabled c=checked o=occluded(被遮挡) v=不在视口 f=已填值
     const useCompact = !!(data.compact || data.som === 'compact');
+    // 实际出图格式以截图结果为准：窗口最小化时 CDP 可能失败、兜底走 captureVisibleTab
+    // （只支持 png/jpeg），webp 会被降级为 jpeg —— 此处若回传请求格式就是谎报，
+    // 调用方会按 webp 的体积/质量预期去理解一张 jpeg。降级时同时回传 formatNote。
+    const actualFormat = shot.format || format;
     const body = {
       success: true,
       dataUrl: shot.dataUrl,
-      format,
+      format: actualFormat,
+      ...(actualFormat !== format ? { requestedFormat: format } : {}),
+      ...(shot.formatNote ? { formatNote: shot.formatNote } : {}),
       url: collected.url,
       title: collected.title,
       viewport: collected.viewport,
@@ -3303,8 +3379,45 @@ class ArkWeb {
     if (log) {
       log.statusCode = details.statusCode;
       log.statusLine = details.statusLine;
+      log.done = true;
+      log.endedAt = details.timeStamp || Date.now();
     }
     this.send({ type: 'network-response', data: { ...log, statusCode: details.statusCode } });
+  }
+
+  /** 请求失败/被取消（被墙、ERR_ABORTED、离线等）—— 同样要标记为"已结束"，
+   *  否则网络空闲等待会把它们一直算作进行中。 */
+  onRequestFailed(details) {
+    if (details.tabId < 0) return;
+    const logs = this.networkLogs.get(details.tabId) || [];
+    const log = logs.find(l => l.id === details.requestId);
+    if (log) {
+      log.error = details.error || 'failed';
+      log.done = true;
+      log.endedAt = details.timeStamp || Date.now();
+    }
+    this.send({ type: 'network-failed', data: { ...log, error: details.error } });
+  }
+
+  /** 当前"进行中"请求数（本 tab）：未收到 completed/error 的请求。
+   *  用于 waitForNetworkIdle —— 比"数总请求数"更能反映"还在加载"。
+   *
+   *  注意：不过滤"调用之前就发起的请求"。导航/动作往往在调用等待前就已发出请求，
+   *  若按发起时间过滤，`open` 后立刻 `wait-for-idle` 会因主文档请求"早了 1ms"而被忽略，
+   *  导致立刻返回（实测踩过）。真正挂死不走完的请求交给 timeout 兜底并如实报错。
+   *  需要排除特定 URL 时用 ignoreUrls（子串匹配）。 */
+  pendingRequestCount(tabId, opts = {}) {
+    const logs = this.networkLogs.get(tabId) || [];
+    const ignoreTypes = opts.ignoreTypes || ['websocket', 'eventsource'];
+    const ignoreUrls = Array.isArray(opts.ignoreUrls) ? opts.ignoreUrls.filter(Boolean) : [];
+    let n = 0;
+    for (const l of logs) {
+      if (l.done) continue;
+      if (ignoreTypes.includes(l.type)) continue;
+      if (ignoreUrls.length && ignoreUrls.some(u => (l.url || '').includes(u))) continue;
+      n++;
+    }
+    return n;
   }
 
   getNetworkLogs(tabId, data) {

@@ -10,6 +10,8 @@
  *  - --url: 指定测试页 URL(默认内置本地服务器)
  */
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 // 连接参数与令牌统一从 client 解析(自动读取 ~/.ark-web/token, 支持 ARK_PORT/ARK_TOKEN)
 const { resolveConnection } = require('../client/browser-client');
 const CONN = resolveConnection();
@@ -122,7 +124,14 @@ async function main() {
   await test('GET /clear-cache', async () => (await GET('/clear-cache')).data.success === true);
   await test('GET /debug/info 插件版本', async () => {
     const r = await GET('/debug/info');
-    return /^2\./.test(r.data.extension || '');
+    // 不再写死主版本号（曾写 /^2\./，插件升到 3.x 后必然假失败）：
+    // 只要求回传一个形如 x.y.z 的版本串，且与仓库 VERSION 同主版本。
+    const v = String(r.data.extension || '');
+    if (!/^\d+\.\d+\.\d+/.test(v)) return `extension=${JSON.stringify(v)}`;
+    let repoVersion = '';
+    try { repoVersion = fs.readFileSync(path.join(__dirname, '..', 'VERSION'), 'utf8').trim(); } catch (e) { /* 可选 */ }
+    if (repoVersion && v.split('.')[0] !== repoVersion.split('.')[0]) return `extension=${v} 与仓库 ${repoVersion} 主版本不一致`;
+    return true;
   });
   let tabs;
   await test('GET /tabs', async () => {

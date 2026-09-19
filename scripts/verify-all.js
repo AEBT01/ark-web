@@ -54,7 +54,14 @@ async function waitFor(fn, tries, gapMs) {
 /** 跑一个套件，抓输出尾部；返回是否通过 */
 function runSuite(title, script, opts) {
   const o = opts || {};
-  process.stdout.write('  ▶ ' + title + ' … ');
+  // 套件文件不存在时明确跳过：这些套件（verify/*.js）在本仓从未提交，
+  // 直接跑会得到一堆 MODULE_NOT_FOUND，看着像"代码坏了"，实际是"套件缺失"。
+  // 按"缺条件的自动跳过并说明"的既定口径处理，并给出补齐位置。
+  if (!fs.existsSync(path.join(ROOT, script))) {
+    skip(title, '套件文件不存在（verify/ 未提交）', '补齐 ' + script + ' 后重跑；当前缺失见 CHANGELOG「已知缺口」');
+    return false;
+  }
+  process.stdout.write('  · ' + title + ' … ');
   const t0 = Date.now();
   const r = spawnSync(process.execPath, [path.join(ROOT, script)], {
     cwd: ROOT, encoding: 'utf8', timeout: o.timeoutMs || 600000,
@@ -143,7 +150,10 @@ async function main() {
   let mockUp = await probe(8899, '/test-page.html');
   if (pluginUp && !mockUp) {
     console.log('  夹具页服务未在跑，自动启动（端口 8899）…');
-    const fd2 = fs.openSync('/tmp/ark-mock.log', 'a');
+    // Windows 上没有 /tmp：日志落到 ~/.ark-web/mock.log（与 server.log 同处），跨平台。
+    const mockLog = path.join(os.homedir(), '.ark-web', 'mock.log');
+    try { fs.mkdirSync(path.dirname(mockLog), { recursive: true }); } catch (e) { /* ignore */ }
+    const fd2 = fs.openSync(mockLog, 'a');
     mockProc = spawn(process.execPath, [path.join(ROOT, 'scripts', 'mock-server.js')], { detached: true, stdio: ['ignore', fd2, fd2] });
     mockProc.unref();
     mockUp = await waitFor(() => probe(8899, '/test-page.html'), 20, 400);

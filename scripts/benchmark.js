@@ -134,6 +134,10 @@ async function main() {
   lines.slice(0, 5).forEach(r => console.log(`  ${r[0]}: ${r[1].toFixed(1)}ms`));
 
   testServer.close();
+  // keep-alive agent 会持有空闲 socket，Node 事件循环因此不退出（实测脚本"跑完不返回"）。
+  // 显式销毁 agent 并给进程一个明确出口。
+  agent.destroy();
+  process.exit(0);
 }
 
 main().catch(e => { console.error('异常:', e.message); process.exit(1); });

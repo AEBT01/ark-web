@@ -1,4 +1,4 @@
-# Ark Web
+﻿# Ark Web
 
 > **本仓只做一件事：浏览器扩展 + Bridge Server，让 AI 操控你正在用的真实浏览器。**
 >
@@ -17,7 +17,7 @@
 
 > [English](README.en.md) | 中文（本页）
 >
-> Control your **real** Chrome from AI — 154 endpoints, snapshot/SoM vision, session isolation, audit engine.
+> Control your **real** Chrome from AI — 155 endpoints, snapshot/SoM vision, session isolation, audit engine.
 
 ![version](https://img.shields.io/badge/version-v3.0.2-blue)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -27,7 +27,7 @@
 
 ## English
 
-**Ark Web** is a local bridge that lets AI agents control your *real* browser — the one you actually use, with your logins and real fingerprint. No puppeteer, no separate browser instance. An MV3 Chrome extension (CDP via `chrome.debugger`) connects over WebSocket to a local Node bridge exposing 154 HTTP endpoints: navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, an atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced session isolation for parallel agents, and a 30+ rule weighted audit engine (performance / a11y / SEO / security / resources).
+**Ark Web** is a local bridge that lets AI agents control your *real* browser — the one you actually use, with your logins and real fingerprint. No puppeteer, no separate browser instance. An MV3 Chrome extension (CDP via `chrome.debugger`) connects over WebSocket to a local Node bridge exposing 155 HTTP endpoints: navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, an atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced session isolation for parallel agents, and a 30+ rule weighted audit engine (performance / a11y / SEO / security / resources).
 
 ```bash
 ./start.sh                 # Windows: start.bat   (or: cd server && npm install && node bridge-server.js)
@@ -82,7 +82,7 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
 │   Chrome 插件        │ ◄──────────────► │   Bridge Server     │ ◄──────────► │   AI / CLI / curl   │
 │   (extension/)      │   ws://9334      │   (server/)         │   :9333      │                     │
 │                     │                  │                     │              │  browser-client.js  │
-│  • background: CDP  │                  │  • HTTP API (154)   │              │  ark.js (别名)      │
+│  • background: CDP  │                  │  • HTTP API (155)   │              │  ark.js (别名)      │
 │  • content: 日志监控│                  │  • 日志聚合          │              │  直接 HTTP          │
 │  • popup: 授权+状态 │                  │  • 缓存/keep-alive  │              │                     │
 └─────────────────────┘                  └─────────────────────┘              └─────────────────────┘
@@ -217,7 +217,7 @@ node client/browser-client.js audit-run '["https://a.com","https://b.com"]'
 node client/browser-client.js history https://a.com
 ```
 
-## 端点总览 (154, 以 `scripts/check-endpoints.js` 核对为准)
+## 端点总览 (155, 以 `scripts/check-endpoints.js` 核对为准)
 
 `GET  /health(免鉴权) /status /tabs /full /clear-cache /page-info /dom /html /frames /layout /screenshot /screenshot/full /pdf /cookies /storage /network /console /dom-changes /performance /vitals /resources /security /a11y /seo /dialogs /history /analyze-all /monitor/status /debug/info /debug/cdp-status /snapshot /snapshot/binary /fast/snapshot`
 

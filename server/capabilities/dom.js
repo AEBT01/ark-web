@@ -171,6 +171,20 @@ module.exports = {
     };
     r['/wait-for-stable'] = H14;
 
+    const H14b = async function (__ark) {
+      const { req, res, url, pathname, tabId, sessionId, ttl, fresh, send } = __ark;
+      const srv = __ark.server;
+      {
+        // 等待网络空闲（Playwright networkidle 等价物）：连续 idleTime 无"进行中请求"才算稳。
+        // 替代"加载后盲等 N 秒"，长轮询站点可用 ignoreTypes 排除。
+        const body = req.method === 'POST' ? await srv.readBody(req, { allowEmpty: true }) : {};
+        if (url.searchParams.get('timeout')) body.timeout = +url.searchParams.get('timeout');
+        if (url.searchParams.get('idleTime')) body.idleTime = +url.searchParams.get('idleTime');
+        return await srv.cmd('wait-for-idle', body, Math.max(5000, (body.timeout || 20000) + 3000));
+      }
+    };
+    r['/wait-for-idle'] = H14b;
+
     const H15 = async function (__ark) {
       const { req, res, url, pathname, tabId, sessionId, ttl, fresh, send } = __ark;
       const srv = __ark.server;

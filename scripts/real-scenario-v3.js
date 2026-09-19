@@ -13,8 +13,8 @@
  */
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-
 const AGENT = new http.Agent({ keepAlive: true });
 const { resolveConnection } = require('../client/browser-client');
 const CONN = resolveConnection();
@@ -587,7 +587,9 @@ async function main() {
   ]);
 
   // ============ 20. 上传 + evaluate 模板 + 等待全家桶 ============
-  const uploadFile = path.join(__dirname, '..', 'reports', 'test-upload.txt');
+  // 上传必须走文件沙箱（~/.ark-web/workspace）：/upload 只接受沙箱内路径，
+  // 放 reports/ 会被拒（path-outside-workspace）。这里与 fs-sandbox 同一根目录。
+  const uploadFile = path.join(os.homedir(), '.ark-web', 'workspace', 'test-upload.txt');
   await task('S20 上传/evaluate/等待全家桶', [
     ['准备上传文件', async () => { fs.mkdirSync(path.dirname(uploadFile), { recursive: true }); fs.writeFileSync(uploadFile, 'ark upload test', 'utf8'); return fs.existsSync(uploadFile); }],
     ['打开上传页', () => nav(`${M}/upload`)],
