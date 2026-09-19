@@ -49,8 +49,8 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
 审计引擎、故障排查）。让 AI 用上它有两种方式，选一种即可：
 
 - **就地使用**（本机开发仓就是运行位置）：告诉 agent 读 `C:\Users\画扇\browser-debug-extension\SKILL.md`。
-- **入口卡模式**：`%USERPROFILE%\.agents\skills\ark-web\` 目录下只有一张指向本仓的入口卡（`SKILL.md`）；
-  完整手册与运行体都在本仓，就地使用，无需把仓库复制进技能目录。
+- **入口卡模式**：`%USERPROFILE%\.agents\skills\ark-web\` 下是入口卡（`SKILL.md`）及其内置的 seek 检索子系统（子目录 seek，直连 40+ 官方 API 的免费检索工具）；
+  浏览器完整手册与运行体都在本仓，就地使用，无需把仓库复制进技能目录。
 
 ### 其他 AI / 新环境接入要点（**踩坑第一名，必读**）
 

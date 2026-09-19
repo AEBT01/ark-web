@@ -142,7 +142,7 @@ Local debug tool: binds **loopback only** and **requires a token on every endpoi
 并叠加 Host / Origin 校验 —— 不要把它暴露到局域网或公网。
 
 Agent 用法：让它读本仓库的 `SKILL.md`（v3.0.2 起为视觉优先的单一手册）。技能目录（如
-`%USERPROFILE%\.agents\skills\ark-web\`）只放一张指向本仓的入口卡；完整手册与运行体都在本仓，就地使用。
+`%USERPROFILE%\.agents\skills\ark-web\`）放入口卡（`SKILL.md`）与内置的 seek 检索子系统（子目录 seek）；浏览器完整手册与运行体都在本仓，就地使用。
 完整中文文档见 `README.md`，版本历史见 `CHANGELOG.md`。
 
 ## License

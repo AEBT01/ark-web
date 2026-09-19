@@ -8,18 +8,18 @@ description: 视觉优先的浏览器操控技能。通过浏览器扩展 + 本�
 > 真实浏览器（Chrome / 夸克等 Chromium 内核）+ 真实鼠标键盘。工作方式是**看图决策**：先截图拿到页面与可交互元素编号，再按编号操作，不依赖猜测 CSS 选择器。
 > 能力覆盖：导航 / 点击 / 填表 / 上传 / 截图放大 / PDF / 网络响应体 / 设备与媒体模拟 / Web Vitals / 30+ 维度审计 / 多标签并行。
 
-## 兄弟技能引导：检索先行（ark-seek）
+## 检索子系统引导：先查后逛（ark-web 内置 seek）
 
-- **本技能（ark-web）管"逛"**：浏览器交互、登录态页面、渲染后动态内容、视觉 QA、审计。
-- **兄弟技能 ark-seek 管"查"**（`C:\Users\画扇\.agents\skills\ark-seek`）：直连 40+ 官方 API 免费检索（学术文献/网页/新闻/图片/专利/财报/数据集/行情/科学数据），快、稳、免登录、带缓存与 SSRF 防护——**凡是要"查信息"而不需要浏览器交互的，先走 ark-seek，别开浏览器**。
+- **ark-web 技能 = 两个子系统**：`%USERPROFILE%\.agents\skills\ark-web\SKILL.md`（入口卡）。其中 **seek 检索子系统**（`ark-web\seek\`，完整手册 `SEEK.md`）直连 40+ 官方 API 免费检索（学术文献/网页/新闻/图片/专利/财报/数据集/行情/科学数据），快、稳、免登录、带缓存与 SSRF 防护——**凡是要"查信息"而不需要浏览器交互的，先走 seek，别开浏览器**。
+- **本仓 = 浏览器子系统**：浏览器交互、登录态页面、渲染后动态内容、视觉 QA、审计。
 
 ```powershell
-& "$env:USERPROFILE\.agents\skills\ark-seek\scripts\lit.ps1" -Cmd search -Src openalex -Q "query" -N 10   # 学术
-& "$env:USERPROFILE\.agents\skills\ark-seek\scripts\web.ps1" -Cmd search -Src bing -Q "query" -N 10       # 网页/新闻/代码
+& "$env:USERPROFILE\.agents\skills\ark-web\seek\scripts\lit.ps1" -Cmd search -Src openalex -Q "query" -N 10   # 学术
+& "$env:USERPROFILE\.agents\skills\ark-web\seek\scripts\web.ps1" -Cmd search -Src bing -Q "query" -N 10       # 网页/新闻/代码
 ```
 
-- **典型降级链**：ark-seek 检索（返回 `meta.failed` 如实报告）→ 场景属反爬/登录墙/无 API（OpenReview/Google Scholar/知网/百度学术/Google Patents 网页/反向图搜）→ 才用本技能只读浏览兜底。
-- 两者平级独立、互不依赖；安全红线同源（只读优先、登录墙/验证码如实报告并停止、不伪造结果）。
+- **典型降级链**：seek 检索（返回 `meta.failed` 如实报告）→ 场景属反爬/登录墙/无 API（OpenReview/Google Scholar/知网/百度学术/Google Patents 网页/反向图搜）→ 才用本仓只读浏览兜底。
+- 两子系统同一技能、同源安全红线（只读优先、登录墙/验证码如实报告并停止、不伪造结果）。
 
 ## 0. 开工前自检（必做，30 秒）
 
