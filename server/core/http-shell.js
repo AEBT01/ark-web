@@ -57,7 +57,7 @@ function createHttpShell(server, router, opt) {
 
     // ---- 第 3 道: 令牌校验（挡本机其他进程 / 任意网页的 CSRF）----
     // 例外: /health 为免鉴权存活探针，只回极简状态，不含任何敏感数据
-    if (o.authToken && pathname !== '/health') {
+    if (o.authToken && pathname !== '/health' && pathname !== '/bootstrap') {
       const provided = server.requestToken(req, url);
       if (!server.tokenEquals(provided, o.authToken)) {
         res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });

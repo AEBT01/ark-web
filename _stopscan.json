@@ -1,0 +1,1 @@
+{"code":"(() => {\n  const S = window.__rscan2;\n  const before = { tested: S.tested, ok: S.ok, must: S.must.length, failed: S.failed.length, throttled: S.throttled };\n  S.vids = []; S.killed = true;\n  return JSON.stringify({ stopped: true, before: before });\n})()","timeout":12000}

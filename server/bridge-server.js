@@ -56,8 +56,8 @@ class ArkWebServer {
     this.authToken = auth.token;
     this.authSource = auth.source;
     this.authTokenFile = auth.tokenFile || null;
-    // WS 侧令牌: 仅在显式配置 ARK_TOKEN / ARK_WS_TOKEN 时强制(插件需在 popup 填相同令牌)
-    this.wsExpectedToken = process.env.ARK_WS_TOKEN || process.env.ARK_TOKEN || null;
+    // WS 侧令牌默认复用 HTTP 鉴权令牌；ARK_WS_TOKEN / ARK_TOKEN 可单独覆盖
+    this.wsExpectedToken = process.env.ARK_WS_TOKEN || process.env.ARK_TOKEN || this.authToken;
     this.wsTokenRequired = !!this.wsExpectedToken;
     this.clients = new Map();
     this.pendingRequests = new Map();
@@ -159,12 +159,12 @@ class ArkWebServer {
         try { ws.close(4003, 'origin not allowed'); } catch { /* ignore */ }
         return;
       }
-      // WS 令牌校验(仅当配置了 ARK_TOKEN / ARK_WS_TOKEN): 防止本机任意进程直连 9334 绕过 HTTP 鉴权
-      if (this.wsTokenRequired) {
+      const trustedExtension = this.isTrustedExtensionOrigin(origin);
+      if (this.wsTokenRequired && !trustedExtension) {
         let provided = null;
         try { provided = new URL(req?.url || '', 'http://localhost').searchParams.get('token'); } catch { /* ignore */ }
         if (!this.tokenEquals(provided, this.wsExpectedToken)) {
-          console.warn('[ArkWeb] 拒绝未授权 WS 连接(令牌不匹配)。请在插件 popup 填写与 ARK_TOKEN 相同的访问令牌。');
+          console.warn('[ArkWeb] 拒绝未授权 WS 连接(令牌不匹配)。请在插件 popup 填写当前服务端访问令牌。');
           try { ws.close(4001, 'invalid token'); } catch { /* ignore */ }
           return;
         }
@@ -398,8 +398,7 @@ class ArkWebServer {
    *  为什么要这张表：多浏览器共存时得知道"哪个连接是谁"。UA 认不出 BrowserOS（与 Chrome 同串），
    *  在扩展里运行时探测又受服务线程启动时序影响。而扩展 ID 对同一份解压目录是确定的，
    *  于是改为"扩展上报 ID、服务端查表"，稳定且可离线生成。 */
-  browserLabelOf(extId, kernel) {
-    if (!extId) return null;
+  labelMap() {
     const now = Date.now();
     if (!this._labelMap || now - (this._labelMapAt || 0) > 5000) {
       try {
@@ -407,8 +406,25 @@ class ArkWebServer {
       } catch (e) { this._labelMap = {}; }
       this._labelMapAt = now;
     }
-    // 复合键优先（区分"同一份目录被两个浏览器加载"），退化到只用 ID
-    return this._labelMap[String(extId) + '|' + String(kernel || '')] || this._labelMap[String(extId)] || null;
+    return this._labelMap || {};
+  }
+
+  browserLabelOf(extId, kernel) {
+    if (!extId) return null;
+    const map = this.labelMap();
+    return map[String(extId) + '|' + String(kernel || '')] || map[String(extId)] || null;
+  }
+
+  isTrustedExtensionOrigin(origin) {
+    if (!origin) return false;
+    try {
+      const u = new URL(origin);
+      if (!EXTENSION_PROTOCOLS.has(u.protocol)) return false;
+      const id = u.hostname || u.pathname.replace(/^\/+/, '');
+      return Object.keys(this.labelMap()).some((key) => key === id || key.startsWith(id + '|'));
+    } catch {
+      return false;
+    }
   }
 
   /** 磁盘上 extension/background.js 的指纹前 8 位（按 mtime 缓存），与插件上报的 build 比对 */
@@ -1062,7 +1078,7 @@ class ArkWebServer {
     if (!origin) return true;
     try {
       const u = new URL(origin);
-      if (EXTENSION_PROTOCOLS.has(u.protocol)) return true;
+      if (EXTENSION_PROTOCOLS.has(u.protocol)) return this.isTrustedExtensionOrigin(origin);
       if (u.protocol === 'http:' || u.protocol === 'https:') {
         if (process.env.ARK_WS_ALLOW_LOCAL === '1') return true;
         return false;
@@ -1081,13 +1097,12 @@ class ArkWebServer {
     if (this.authSource === 'disabled') {
       console.warn('  · 令牌鉴权: 已禁用(ARK_NO_AUTH=1) —— 本机任意进程与任意网页均可操控浏览器, 请勿在不可信环境使用!');
     } else {
-      const src = { env: 'ARK_TOKEN 环境变量', file: 'server/.ark-token', generated: '本次自动生成并写入 server/.ark-token', options: '构造参数' }[this.authSource] || this.authSource;
-      console.log(`  · 令牌鉴权: 已启用(来源: ${src})`);
-      console.log(`  · 访问令牌: ${this.authToken}`);
+      console.log(`  · 令牌鉴权: 已启用(来源: ${this.authSource})`);
+      console.log('  · 访问令牌: 不写入日志，请从令牌文件读取');
       console.log('    (请求需带 X-Ark-Token 头或 ?token=; client/browser-client.js 会自动读取并携带)');
     }
     if (this.wsTokenRequired) {
-      console.log('  · WS 令牌: 已启用(插件 popup 需填入相同令牌)');
+      console.log('  · WS 令牌: 已启用(已登记扩展可免填；其它连接需令牌)');
     } else {
       console.log('  · WS 令牌: 未启用。网页来源已被来源校验挡住; 同机其他用户/进程仍可直连 9334 ——');
       console.log('    多人共用或不可信本机环境下, 设置 ARK_TOKEN 并在插件 popup 填同一令牌即可完全关闭。');

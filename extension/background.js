@@ -474,7 +474,7 @@ class CdpManager {
 class ArkWeb {
   constructor() {
     this.ws = null;
-    // 连接配置: 默认与本机 server 对齐(127.0.0.1:9334, 无令牌);
+    // 连接配置: 默认与本机 server 对齐(127.0.0.1:9334, 无令牌；已登记扩展可自动识别，未登记扩展需在 popup 配置令牌);
     // 可在 popup 修改并持久化到 chrome.storage.local(键: arkWsHost / arkWsPort / arkWsToken)
     this.wsHost = '127.0.0.1';
     this.serverPort = 9334;
@@ -623,6 +623,24 @@ class ArkWeb {
       this.wsToken = cfg.arkWsToken ? String(cfg.arkWsToken).trim() : '';
       this.label = cfg.arkLabel ? String(cfg.arkLabel).trim() : '';
     } catch { /* storage 不可用时用默认值 */ }
+    // ★ 2026-10-02 多实例零手动接入：新装的扩展副本（独立 user-data-dir）storage 是空的 ⇒ 没令牌
+    //   ⇒ 连不上 WS。这里自动向本机 /bootstrap 取一次令牌并落盘。
+    //   安全：/bootstrap 只对"白名单扩展来源(chrome-extension://)"或无 Origin 的本机进程放行，
+    //   网页来源(http/https)一律拒绝 —— 与 WS 的来源校验同源策略，不构成降级。
+    if (!this.wsToken) {
+      try {
+        const base = 'http://' + (this.wsHost || '127.0.0.1') + ':9333';
+        const r = await fetch(base + '/bootstrap', { cache: 'no-store' });
+        if (r.ok) {
+          const j = await r.json();
+          if (j && j.token) {
+            this.wsToken = String(j.token).trim();
+            try { await chrome.storage.local.set({ arkWsToken: this.wsToken }); } catch (e) { /* 落盘失败也能本次生效 */ }
+            console.log('[ArkWeb] 已从 /bootstrap 自动取得令牌（多实例零手动接入）');
+          }
+        }
+      } catch (e) { /* 服务未起时保持无令牌，连不上会在 popup 显示 */ }
+    }
     return { host: this.wsHost, port: this.serverPort, token: this.wsToken, label: this.label || this.defaultLabel() };
   }
 
@@ -631,6 +649,13 @@ class ArkWeb {
    *  用 management 权限按扩展清单反查即可确认"这就是产品浏览器"。 */
   defaultLabel() {
     if (this._labelCache) return this._labelCache;
+    // ★ 2026-10-02 多实例：扩展副本的 manifest name 若带 [名字] 后缀（启动器写入），
+    //   以它为连接名 —— getManifest() 是同步 API，首次注册就带正确名字，无需补发。
+    try {
+      const m = chrome.runtime.getManifest();
+      const mm = /\[(.+?)\]\s*$/.exec(String(m.name || ''));
+      if (mm && mm[1]) { this._labelCache = mm[1].trim(); return this._labelCache; }
+    } catch (e) { /* manifest 不可读时走内核名 */ }
     this._labelCache = this.detectKernel();
     return this._labelCache;
   }
@@ -644,6 +669,9 @@ class ArkWeb {
    *  所以这里带重试，并且注册是"先发基础名、升级后补发"，不让精化拖慢连接。 */
   async refineLabel(retries) {
     if (this.label) return this.label;   // 用户显式设过就不动
+    // ★ 2026-10-02 多实例：manifest name 带 [名字] 的副本（defaultLabel 已解析进缓存）
+    //   在这里直接返回，不做面板探测 —— 避免同名实例被误升级成 browseros。
+    if (this._labelCache && this._labelCache !== this.detectKernel()) return this._labelCache;
     const tries = retries || 3;
     for (let i = 0; i < tries; i++) {
       try {
@@ -661,6 +689,21 @@ class ArkWeb {
       if (i < tries - 1) await new Promise(function (r) { setTimeout(r, 700 * (i + 1)); });
     }
     return this._labelCache || this.defaultLabel();
+  }
+
+  /** ★ 读扩展目录里的 label.txt（由启动器/spawn-instance 写入），有就把它当作连接名。
+   *  这是多实例自动命名的机制：每个隔离实例的扩展副本带各自的 label.txt ⇒
+   *  同款浏览器多开也能各有独立连接名，服务端可精确定向。 */
+  async loadLabelFile() {
+    if (this._labelFileDone) return;
+    this._labelFileDone = true;
+    try {
+      const r = await fetch(chrome.runtime.getURL('label.txt'));
+      if (r.ok) {
+        const t = String(await r.text() || '').trim();
+        if (t) this._labelCache = t;
+      }
+    } catch (e) { /* 没有 label.txt：维持内核名/面板探测 */ }
   }
 
   /** 发送注册消息（记录本次实际发出的连接名，供精化后判断是否需要补发） */
@@ -703,6 +746,7 @@ class ArkWeb {
   }
 
   async saveWsConfig(partial = {}) {
+    const oldToken = this.wsToken;   // ★ 用于判断"令牌是否变了"（变了要重连，令牌在 WS URL 里）
     const next = {
       ...(partial.host != null ? { arkWsHost: String(partial.host).trim() } : {}),
       ...(partial.port != null ? { arkWsPort: String(parseInt(partial.port, 10) || 9334) } : {}),
@@ -711,6 +755,21 @@ class ArkWeb {
     };
     await chrome.storage.local.set(next);
     await this.loadWsConfig();
+    // ★ 2026-10-02 修复：连接名/令牌只在"注册"那一刻上报 —— 过去保存后不重注册，
+    //   服务端仍按旧标签路由（实测踩到：popup 显示 acheng，服务端还是 quark）。
+    //   令牌变了必须重连（令牌在 WS URL 里）；只改连接名则补发一次注册即可。
+    try {
+      if (this.connected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (String(oldToken || '') !== String(this.wsToken || '')) {
+          this.ws.close();
+          setTimeout(() => { try { this.connectToServer(); } catch (e) { } }, 300);
+        } else {
+          this._sentLabel = null;
+          this.sendRegister();
+          console.log('[ArkWeb] 连接名已更新并补发注册: ' + (this.label || this.defaultLabel()));
+        }
+      }
+    } catch (e) { /* 未连接时下次注册自然带上新配置 */ }
     return { host: this.wsHost, port: this.serverPort, token: this.wsToken, label: this.label || this.defaultLabel() };
   }
 
@@ -4515,6 +4574,20 @@ class ArkWeb {
       const tabId = data?.tabId || (await this.activeTabId());
       switch (type) {
         case 'get-status': sendResponse(await this.getStatus()); break;
+        case 'ark-open-production-panel': {
+          // ★ 2026-10-02：商品发布页悬浮入口 → 打开【生产线面板】(side panel)。
+          //   必须有有效用户手势（点击）才能 open；面板路径 panel.html（manifest.side_panel 已声明）。
+          const tid = data?.tabId || (sender && sender.tab && sender.tab.id) || tabId;
+          if (!tid || !chrome.sidePanel || !chrome.sidePanel.open) {
+            sendResponse({ ok: false, error: '当前宿主不支持 sidePanel.open' });
+            break;
+          }
+          chrome.sidePanel.setOptions({ path: 'panel.html', enabled: true })
+            .then(() => chrome.sidePanel.open({ tabId: tid }))
+            .then(() => sendResponse({ ok: true }))
+            .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
+          break;
+        }
         case 'get-tabs': sendResponse(await this.getTabs()); break;
         case 'get-page-info': sendResponse(await this.getPageInfo(tabId)); break;
         case 'get-dom': sendResponse(await this.getDOM(tabId)); break;

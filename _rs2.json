@@ -1,0 +1,1 @@
+{"timeout":12000,"code":"(() => JSON.stringify({ done: window.__rscan2.done, tested: window.__rscan2.tested, ok: window.__rscan2.ok, failed: window.__rscan2.failed.length, must: window.__rscan2.must.length, throttled: window.__rscan2.throttled, rounds: window.__rscan2.rounds, elapsedMin: Math.round((Date.now() - window.__rscan2.started) / 600) / 100 }))()"}

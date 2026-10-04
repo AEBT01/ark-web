@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Ark Web",
-  "version": "3.0.2",
-  "description": "AI 浏览器调试桥接插件 — 通过 CDP 提供真实浏览器控制能力 (Ark Web v3.0.2)",
+  "version": "3.0.4",
+  "description": "AI 浏览器调试桥接插件 + 假一罚十生产线面板 (Ark Web v3.0.4)",
   "permissions": [
     "activeTab",
     "tabs",
@@ -14,7 +14,8 @@
     "cookies",
     "management",
     "offscreen",
-    "alarms"
+    "alarms",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -29,8 +30,16 @@
       "js": ["content.js"],
       "run_at": "document_idle",
       "all_frames": true
+    },
+    {
+      "matches": ["https://mms.pinduoduo.com/*"],
+      "js": ["prod-badge.js"],
+      "run_at": "document_idle"
     }
   ],
+  "side_panel": {
+    "default_path": "panel.html"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

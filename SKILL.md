@@ -1,12 +1,16 @@
-﻿---
+---
 name: ark-web
-description: 视觉优先的浏览器操控技能。通过浏览器扩展 + 本机 Bridge Server 真实操控 Chrome/夸克等 Chromium 浏览器：截图理解页面、按编号直接点击/填表、放大读小字、视觉 QA、性能审计、数据抓取、多标签并行。当需要打开网页、点击、填表、截图、抓取页面数据、测试网页、排查页面问题、做性能/可访问性审计时使用。
+description: Ark Web 浏览器扩展与 Bridge Server 的视觉操作实现：截图理解页面、元素编号操作、视觉 QA、渲染后页面与性能/可访问性审计。仅在用户明确选择 Ark Web 浏览器路线或需要这些视觉能力时使用；普通信息查询先用 ark-web seek，普通 BrowserOS/Neo 交互不由本技能负责。
 ---
 
-# Ark Web — AI 浏览器控制技能 v3.0.2（视觉优先）
+# Ark Web — AI 浏览器控制技能 v3.0.4（视觉优先）
 
 > 真实浏览器（Chrome / 夸克等 Chromium 内核）+ 真实鼠标键盘。工作方式是**看图决策**：先截图拿到页面与可交互元素编号，再按编号操作，不依赖猜测 CSS 选择器。
-> 能力覆盖：导航 / 点击 / 填表 / 上传 / 截图放大 / PDF / 网络响应体 / 设备与媒体模拟 / Web Vitals / 30+ 维度审计 / 多标签并行。
+## 路由边界
+
+- 公开信息查询先用 `ark-web` 的 `seek` 子系统。
+- 需要视觉快照、元素编号、截图、渲染后内容、视觉 QA 或扩展审计时，才使用 Ark Web 浏览器子系统。
+- 普通登录、下载、表单和一般网页操作交给 BrowserOS Neo；不要在同一任务中无理由切换路线。
 
 ## 检索子系统引导：先查后逛（ark-web 内置 seek）
 
@@ -34,6 +38,7 @@ description: 视觉优先的浏览器操控技能。通过浏览器扩展 + 本�
    cd ~/browser-debug-extension                       # macOS / Linux
    ```
    本机固定位置就是这里；若你把仓库复制到别处（例如 agent 的技能目录），cd 到那一份即可。
+   首次加载扩展后运行 `node scripts/label-browsers.js --yes`，生成本机扩展 ID 白名单。
    不想 cd 就用绝对路径调 CLI（`/health` 会返回该绝对路径）。
 
 2. **优先用 CLI**：`node client/browser-client.js`（或别名 `node ark.js`）**会自动读取令牌**，永不 401。
@@ -66,14 +71,14 @@ node client\browser-client.js tabs                          # ③ 能列出标�
   "usage": { "preferred": "node \"...\\browser-client.js\" status   (CLI 会自动读取令牌, 推荐)" } }
 ```
 
-服务没起时：`node server\bridge-server.js`（或 `start.bat` / `./start.sh`）。
+服务没起时：`node server\bridge-server.js`（或 `start.bat` / `./start.sh`）。本机已登记的 Ark Web 扩展会自动连接；其它连接需把 `~/.ark-web/token` 填入插件 popup。
 
 ### 0.3 连接异常速查（**先看这张表再怀疑代码**）
 
 | 症状 | 原因 | 处置 |
 |---|---|---|
 | `401: 缺少或错误的访问令牌` | 直接 HTTP 调用没带令牌 | 带上 `X-Ark-Token`；或改用 CLI（自动带） |
-| `插件未连接` / `connected: false` | 浏览器没开 / 插件没加载 / 未点「启用调试」 | 打开浏览器 → `chrome://extensions` 加载 `extension/` → popup 点「启用调试」 |
+| `插件未连接` / `connected: false` | 浏览器没开 / 插件未加载 / 扩展 ID 未登记 | 先运行 `node scripts/label-browsers.js --yes`，再打开浏览器 → `chrome://extensions` 加载 `extension/` → popup 点「启用调试」 |
 | **`connected: true` 但命令全部超时** | **僵尸连接**：插件重载或浏览器休眠后残留的旧连接 | ① 已内建自愈：超时会自动换连接重试（8s），120s 静默自动清理；② 仍不行则重启 server；③ 看 `/status` 的 `connections[]`（`suspect:true` 即可疑连接） |
 | 只有部分命令超时 | 页面被模态弹窗阻塞 / 渲染忙 | `GET /dialogs` 看弹窗；`POST /dialog {auto:true}`；`POST /tab/activate` 激活标签页 |
 | 命令报 `需要 CDP` | 调试授权过期（插件重载/浏览器重启后必失效） | `node client/browser-client.js debug-on`（等价 `POST /debug/attach-all`，**无需点 popup**） |
@@ -195,7 +200,7 @@ node client\browser-client.js chain "open https://example.com" "wait-load" "wait
 
 > 注意：**带 clip 的截图（`zoom` / `screenshot-element`）必须由合成器出图**，窗口最小化时可能超时（会返回 `degraded` 并降级为元素截图）；`/snapshot` 整屏截图已改用渲染进程出图（实测 ~0.5s）。
 
-## 2. 能力速查（155 端点）
+## 2. 能力速查（156 端点）
 
 **⚡ = 需 CDP 调试授权**（未启用时自动降级为脚本模拟）
 
@@ -245,6 +250,76 @@ POST /session/delete {sessionId, closeTabs:true}
 
 带 `?session=<id>` 即进入隔离：越权访问他会话标签页返回 403；单 tab 会话免传 tabId，多 tab 会话必须显式 `?tabId=`；设备/媒体/弹窗策略均 per-tab 隔离。**任务结束必须清理**：会话用 `/session/delete`，共享标签页用 `/reset-all?tabId=`。
 
+## 4.5 多窗口隔离（多账号并联 / 多实例）—— 2026-10-02 实测定稿
+
+**场景**：同一台机器上开 N 个浏览器窗口，各登一个账号（每账号一份登录态），命令要能**定向**发到指定窗口。
+
+### 连接名（label）是怎么定的
+
+优先级（扩展 `background.js`，服务端 `bridge-server.js:314` 同序）：
+
+```
+① chrome.storage.local.arkLabel   ← popup 里手填的"连接名"（每个 profile 独立存储）★官方多开口子
+② manifest name 的 [名字] 后缀     ← 扩展副本自命名（getManifest() 同步读，零手动；见下）
+③ 查表 ~/.ark-web/browser-labels.json（extId|内核 → 标签）—— 服务端兜底，5s 缓存
+④ detectKernel()：UA 判内核（Quark→quark / Edg→edge / Chrome→chrome …）
+⑤ refineLabel()：本浏览器装了「Ark 助手」面板扩展 ⇒ 升级为 browseros
+```
+
+**官方口径 = 一个浏览器产品一个标签**：`scripts/label-browsers.js` 扫 6 种产品的 profile
+（BrowserClaw→browseros / Quark→quark / Chrome→chrome / Edge→edge / Chromium→chromium / Brave→brave），
+把路径含 `browser-debug-extension` 的扩展登记进表。**同产品多开在官方口径里不区分** ⇒ 要区分就得用 ① 或 ②。
+
+### 三个硬约束（缺一个就出问题）
+
+| # | 约束 | 后果 |
+|---|---|---|
+| ① | **每实例独立 `--user-data-dir`** | 共用则第 2 次启动只是"在原进程里开新窗口"⇒ 共用 cookie ⇒ 只能登一个账号 |
+| ② | **每实例至少留 1 个标签页** | **夸克零标签页 = 整个浏览器退出**（实测反复踩）；关标签前先留 `about:blank` 垫底 |
+| ③ | **扩展注册（extId）必须进白名单** | 服务端 `isTrustedExtensionOrigin` 拒绝未登记的来源 ⇒ 扩展**连不上**（现象：窗口开着但 `/status` 里没有它） |
+
+### 隔离实例的正确建法
+
+```powershell
+# 官方登记（新增浏览器产品副本后跑一次；同产品多开它区分不了，见上）
+cd $env:USERPROFILE\browser-debug-extension
+node scripts\label-browsers.js --yes
+
+# 隔离实例（本仓配套脚本，每跑一次多开一个合规实例）
+node tools\launch-instances.js --n=1 --label=iso1
+#   · 复制扩展到 ~\.ark-web\instances\acct1\panel（路径唯一 ⇒ extId 唯一）
+#   · 把连接名烤进副本 manifest：Ark Web [iso1]（机制 ②）
+#   · 清 profile 的 Service Worker 缓存（否则旧 SW 代码/旧连接名不生效）
+#   · 启动：quark.exe --user-data-dir=<独立> --new-window <起始页>
+#   · 读 Secure Preferences 拿 extId → 写 browser-labels.json（满足约束 ③）
+```
+
+**夸克注意**：**无视 `--load-extension`**（实测 profile 的 extensions.settings 为空，`--disable-features=DisableLoadExtensionCommandLineSwitch` 也无效）
+⇒ 首次必须在该窗口 `chrome://extensions` → 开发者模式 → **加载已解压的扩展程序** → 指向 `~\.ark-web\instances\acctN\panel`；
+之后注册持久化，以后启动自动带上。
+
+### 零手动接入：`GET /bootstrap`
+
+新 profile 的 `chrome.storage` 是空的 ⇒ 没有令牌 ⇒ 连不上 WS（`wsTokenRequired`）。扩展启动时自动向
+`http://127.0.0.1:9333/bootstrap` 取一次令牌并落盘（`arkWsToken`），**无需人工粘贴**。
+
+安全模型（与 WS 来源校验同源，不构成降级）：
+
+| 来源 | 结果 |
+|---|---|
+| 无 Origin（本机进程） | 放行（本就能读令牌文件） |
+| `chrome-extension://<白名单 extId>` | 放行 |
+| `http(s)://`（任意网页） | **403 拒绝**（WebSocket 不受 CORS 约束，所以 HTTP 侧也不给） |
+
+### 排障速查
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| 窗口开着但 `/status` 无该连接 | extId 未登记（约束 ③）或令牌缺失 | 跑 `label-browsers.js --yes`；确认扩展能访问 `/bootstrap` |
+| 两个窗口标签相同（如都是 `quark`） | 同产品多开 + 官方表按产品给标签 | 用 popup 手填连接名，或用本仓副本 manifest `[名字]` 机制 |
+| 改了 `background.js` 但行为不变 | **夸克缓存 Service Worker 脚本** | 删 `<profile>\Default\Service Worker` 后重启，或在扩展页「重新加载」 |
+| 改了 `extension/` 后 | 需在浏览器里**手动重载插件**；改 `server/` 后需**重启 server** | README「环境依赖」 |
+
 ## 5. 弹窗
 
 默认 `autoAccept:true`：事件驱动同步自动确认，**不卡流程，无需预处理**。需人工决策时 `POST /dialog {auto:false}` → 交互命令返回 `{dialogPending:true}` → `POST /dialog {accept, promptText}` 应答；60s 无应答自动回退（防 agent 失联卡死用户页面）。
@@ -268,7 +343,7 @@ node client\browser-client.js audit-html report.html https://target
 | **令牌鉴权** | 除 `/health` 外所有端点需 `X-Ark-Token` / `Authorization: Bearer` / `?token=`。令牌在 **`~/.ark-web/token`**（Windows：`%USERPROFILE%\.ark-web\token`），0600 权限；启动日志与 `/health` 都会给出路径 |
 | **Host 校验** | 拒绝非回环 Host → 挡 DNS rebinding |
 | **Origin 校验** | 仅接受无 Origin（CLI）、浏览器扩展页面、本机页面来源；**不回显 `ACAO: *`** → 挡任意网页 CSRF 操控浏览器 |
-| **WS 令牌** | 设 `ARK_TOKEN`（或 `ARK_WS_TOKEN`）后，插件必须在 popup「连接配置」填相同令牌，否则拒绝连接 |
+| **WS 令牌** | 本机已登记的 Ark Web 扩展可自动连接；其它本机进程或扩展必须提供 HTTP 鉴权令牌 |
 
 ```powershell
 $env:ARK_TOKEN='my-strong-token'; node server\bridge-server.js   # 自定义令牌(可选; 不设则自动生成)
@@ -305,6 +380,6 @@ curl.exe -H "X-Ark-Token: $(Get-Content "$env:USERPROFILE\.ark-web\token" -Raw)"
 
 ## 版本
 
-- 运行时版本以 `extension/manifest.json` 为准（本手册对应 v3.0.2）；`/status` 会同时给出 **server 版本**与**插件上报版本**，两者不一致说明浏览器里跑的不是最新代码。
-- 改了 `extension/` 后：`node scripts/sync.js --yes` → `POST /reload-extension` → `POST /debug/attach-all`。
+- 运行时版本以 `extension/manifest.json` 为准（本手册对应 v3.0.4）；`/status` 会同时给出 **server 版本**与**插件上报版本**，两者不一致说明浏览器里跑的不是最新代码。
+- 改了 `extension/` 后：`node scripts/sync.js --yes` → `POST /reload-extension` → `POST /debug/attach-all`；新增浏览器副本后重新运行 `node scripts/label-browsers.js --yes`。
 - 历史见 `CHANGELOG.md`；环境体检 `node scripts/doctor.js`。

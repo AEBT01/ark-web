@@ -201,7 +201,7 @@ module.exports = {
           const sandbox = require('../core/fs-sandbox');
           const out = [];
           for (const f of files) {
-            const r = sandbox.resolveSafe(f);
+            const r = sandbox.resolveInside(f);
             if (!r) {
               return { error: 'path-outside-workspace', file: f,
                 message: '上传只允许工作区（~/.ark-web/workspace）内的文件；越界路径被拒绝。',

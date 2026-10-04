@@ -25,7 +25,7 @@ const path = require('path');
 /** 文件工具的沙箱根与"是否在沙箱内"的判定统一在 core/fs-sandbox.js ——
  *  上传（/upload）也用它，避免"两个入口两套规则"（曾经沙箱只挡工具层，
  *  上传却能带任意绝对路径，等于绕过了整个沙箱）。 */
-const { FS_ROOT, resolveSafe } = require('./core/fs-sandbox');
+const { FS_ROOT, resolveInside } = require('./core/fs-sandbox');
 
 function cut(s, n) { return String(s == null ? '' : s).slice(0, n); }
 
@@ -1214,7 +1214,7 @@ function define(t) {
       required: ['path']
     },
     handler: async (a) => {
-      const abs = resolveSafe(a.path);
+      const abs = resolveInside(a.path);
       if (!abs) return { ok: false, error: 'path-outside-workspace' };
       try {
         const st = fs.statSync(abs);
@@ -1240,7 +1240,7 @@ function define(t) {
       required: ['path', 'content']
     },
     handler: async (a) => {
-      const abs = resolveSafe(a.path);
+      const abs = resolveInside(a.path);
       if (!abs) return { ok: false, error: 'path-outside-workspace' };
       try {
         fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -1262,7 +1262,7 @@ function define(t) {
       properties: { path: { type: 'string', description: '工作区内相对路径，空 = 根目录' } }
     },
     handler: async (a) => {
-      const abs = resolveSafe(a.path || '');
+      const abs = resolveInside(a.path || '');
       if (!abs) return { ok: false, error: 'path-outside-workspace' };
       try {
         fs.mkdirSync(abs, { recursive: true });

@@ -1,6 +1,6 @@
 {
     "name":  "ark-web-bridge-server",
-    "version":  "3.0.2",
+    "version":  "3.0.4",
     "description":  "Ark Web Bridge Server - 连接 Chrome 插件和 AI 终端",
     "main":  "bridge-server.js",
     "scripts":  {

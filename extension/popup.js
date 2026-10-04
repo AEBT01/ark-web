@@ -41,7 +41,7 @@ class PopupController {
     hint.textContent = `当前: ws://${cfg.host || '127.0.0.1'}:${cfg.port || 9334}`
       + ` ｜ 连接名: ${cfg.label || '(默认)'}`
       + ` ｜ 令牌: ${cfg.token ? '已配置' : '无'}`
-      + ' —— 令牌需与 server 的 ARK_TOKEN / ARK_WS_TOKEN 一致。';
+      + ' —— 已登记的 Ark Web 扩展可自动连接；其它连接需填写当前服务端令牌。';
   }
 
   // ============ Tab 切换 ============

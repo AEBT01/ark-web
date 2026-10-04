@@ -1,4 +1,4 @@
-﻿# Ark Web
+# Ark Web
 
 > **本仓只做一件事：浏览器扩展 + Bridge Server，让 AI 操控你正在用的真实浏览器。**
 >
@@ -17,9 +17,9 @@
 
 > [English](README.en.md) | 中文（本页）
 >
-> Control your **real** Chrome from AI — 155 endpoints, snapshot/SoM vision, session isolation, audit engine.
+> Control your **real** Chrome from AI — 156 endpoints, snapshot/SoM vision, session isolation, audit engine.
 
-![version](https://img.shields.io/badge/version-v3.0.2-blue)
+![version](https://img.shields.io/badge/version-v3.0.4-blue)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > AI 浏览器调试桥接 — 浏览器扩展 + Bridge Server + HTTP API = 真实浏览器控制
@@ -27,7 +27,7 @@
 
 ## English
 
-**Ark Web** is a local bridge that lets AI agents control your *real* browser — the one you actually use, with your logins and real fingerprint. No puppeteer, no separate browser instance. An MV3 Chrome extension (CDP via `chrome.debugger`) connects over WebSocket to a local Node bridge exposing 155 HTTP endpoints: navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, an atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced session isolation for parallel agents, and a 30+ rule weighted audit engine (performance / a11y / SEO / security / resources).
+**Ark Web** is a local bridge that lets AI agents control your *real* browser — the one you actually use, with your logins and real fingerprint. No puppeteer, no separate browser instance. An MV3 Chrome extension (CDP via `chrome.debugger`) connects over WebSocket to a local Node bridge exposing 156 HTTP endpoints: navigation, trusted mouse/keyboard, React-compatible form fill, screenshots & PDF, device/media/network emulation, network response bodies, an atomic vision `snapshot` (screenshot + SoM coordinate anchors) for multimodal models, server-enforced session isolation for parallel agents, and a 30+ rule weighted audit engine (performance / a11y / SEO / security / resources).
 
 ```bash
 ./start.sh                 # Windows: start.bat   (or: cd server && npm install && node bridge-server.js)
@@ -41,7 +41,7 @@ curl -H "X-Ark-Token: $TOKEN" "http://127.0.0.1:9333/snapshot?annotate=1"   # sc
 ```
 
 AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapshot, then act on numbered elements (`clickRef`/`fillRef`) instead of guessing selectors. CLI: `node client/browser-client.js help`. Windows users: prefer PowerShell `Invoke-RestMethod` over curl.exe for JSON bodies, and always pass Chinese text via `--body-file`.
-**Hardened by default**: bound to loopback only, token auth on every endpoint, plus Host/Origin validation. See [安全](#安全).
+**Hardened by default**: bound to loopback only, token auth on every HTTP endpoint, extension-origin allowlisting for WS, plus Host/Origin validation. See [安全](#安全).
 
 ## 作为 Skill 使用(推荐)
 
@@ -82,7 +82,7 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
 │   Chrome 插件        │ ◄──────────────► │   Bridge Server     │ ◄──────────► │   AI / CLI / curl   │
 │   (extension/)      │   ws://9334      │   (server/)         │   :9333      │                     │
 │                     │                  │                     │              │  browser-client.js  │
-│  • background: CDP  │                  │  • HTTP API (155)   │              │  ark.js (别名)      │
+│  • background: CDP  │                  │  • HTTP API (156)   │              │  ark.js (别名)      │
 │  • content: 日志监控│                  │  • 日志聚合          │              │  直接 HTTP          │
 │  • popup: 授权+状态 │                  │  • 缓存/keep-alive  │              │                     │
 └─────────────────────┘                  └─────────────────────┘              └─────────────────────┘
@@ -96,7 +96,7 @@ AI agents should load `SKILL.md` — a **vision-first** manual: look at a snapsh
 2. 开启「开发者模式」
 3. 「加载已解压的扩展程序」→ 选择 `extension/` 目录
 4. 点击插件图标 → 「启用调试」(Chrome 136+ 必须, 开启 CDP 真实控制能力)
-5. 若 server 使用自定义端口或启用了 `ARK_TOKEN`, 在插件 popup →「工具」→「连接配置」填好并保存重连
+5. 运行 `node scripts/label-browsers.js --yes` 生成本机扩展 ID 白名单；已登记的 Ark Web 扩展会自动连接，未登记的副本或其它扩展才需要在 popup 填入 `~/.ark-web/token`
 
 ### 2. 启动 Bridge Server
 
@@ -195,7 +195,7 @@ node ark.js status
 - **裁剪放大 / 读小字**: `POST /snapshot/zoom {ref|selector, scale(1-5), format}` —— CDP `clip` + `scale` 局部放大, 读小小字/图表细节; CDP 不可用时降级元素截图
 - **元素语义增强**: 快照元素带 `disabled/checked/inputType/value/placeholder/href/expanded/inViewport/occluded`, 只在非默认值时输出以省 token; `occluded` 直接告诉你"点了会打到遮罩"
 - **webp 格式**: `format=webp` 让截图体积进一步下降(视觉模型最省 token), `/snapshot/binary` 同步支持
-- **安全默认加固**: 仅回环监听 + 全端点令牌鉴权 + Host/Origin 校验 + 移除 `ACAO: *`, 插件 WS 端口/令牌可在 popup 配置(详见 [安全](#安全))
+- **安全默认加固**: 仅回环监听 + HTTP 全端点令牌鉴权 + 已登记扩展自动识别 + 其它 WS 连接令牌校验 + Host/Origin 校验 + 移除 `ACAO: *`
 - **专业审计引擎**: `POST /audit` — 采集 30+ 维度(Web Vitals/长任务/资源瀑布/图片字体/框架检测/DOM 复杂度/安全头),5 类别加权评分(0-100),确定性根因洞察 + ROI 排序优化机会
 - **可视化报告**: HTML 单文件报告(评分环/指标卡/问题卡)+ Markdown 版 + AI 可读紧凑格式
 - **趋势与批量**: JSONL 历史存储 + 前后对比,URL 队列异步审计,性能预算违规检测
@@ -217,7 +217,7 @@ node client/browser-client.js audit-run '["https://a.com","https://b.com"]'
 node client/browser-client.js history https://a.com
 ```
 
-## 端点总览 (155, 以 `scripts/check-endpoints.js` 核对为准)
+## 端点总览 (156, 以 `scripts/check-endpoints.js` 核对为准)
 
 `GET  /health(免鉴权) /status /tabs /full /clear-cache /page-info /dom /html /frames /layout /screenshot /screenshot/full /pdf /cookies /storage /network /console /dom-changes /performance /vitals /resources /security /a11y /seo /dialogs /history /analyze-all /monitor/status /debug/info /debug/cdp-status /snapshot /snapshot/binary /fast/snapshot`
 
@@ -234,7 +234,7 @@ node client/browser-client.js history https://a.com
 ```
 ark-web/
 ├── extension/            # Chrome 插件
-│   ├── manifest.json     # v3.0.2
+│   ├── manifest.json     # v3.0.4
 │   ├── background.js     # CDP 管理器 + 命令实现 + 视觉快照/ref/zoom
 │   ├── content.js        # 控制台/DOM/Storage 监控
 │   ├── popup.html/js     # 状态 + 调试授权 + 连接配置(WS 主机/端口/令牌)
@@ -276,20 +276,21 @@ ark-web/
 ## 上手与验证
 
 - **文档渲染**：`node scripts/build-docs.js` 把 Markdown 渲染成自包含单文件 HTML（默认 `README.md` → `docs/README.html`，可 `--in=`/`--out=` 指定；双击即可看，可直接打印）；`docs/index.html` 是 GitHub Pages 手写落地页，不由该脚本生成
-- **一键验证**：`node scripts/verify-all.js`（按"需要什么条件"分层；缺条件的会明确跳过并给补齐命令。注意：本仓 `verify/` 目录未提交，见 `CHANGELOG.md` 已知缺口——未补齐时运行时 2 项会失败）
+- **一键验证**：`node scripts/verify-all.js`（按"需要什么条件"分层；缺少浏览器或验证套件时明确显示跳过，不把缺件误报成代码失败）
 - **打包发版**：`node scripts/bump-version.js <版本>` 统一版本 → `node scripts/package.js` 产出 `dist/`
 
 ## 已知限制与技术债
 
 - 历史技术债已全部清零(v2.3.1): server 并发竞态(ALS 隔离)、命令死锁恢复链、SW 保活(alarms + keepalive port)、device clear 自愈、日志上限
-- 环境依赖: 改 background.js 后需手动重载插件; 改 server 后需重启 `node server/bridge-server.js`
+- 环境依赖: 改 `extension/` 后需同步并手动重载插件；改 `server/` 后需重启 `node server/bridge-server.js`；新增浏览器副本后重新运行 `node scripts/label-browsers.js --yes`
+- **多窗口隔离（多账号）**: 每实例独立 `--user-data-dir` + 每实例至少留 1 个标签页（**夸克零标签页会整个退出**）+ 扩展 extId 必须登记；新 profile 的令牌由 `GET /bootstrap` 自动下发（仅白名单扩展来源，网页来源 403）。完整建设见 `SKILL.md` §4.5
 - 浏览器兼容: Chrome / 夸克(Chromium)均通过全量测试; 夸克 UA 下必应结果页有 `b_ans/b_top` 答案卡片(测试已适配)
 
 ## 发布打包
 
 ```bash
 node scripts/package.js
-# → dist/ark-web-v3.0.2.zip (含扩展/服务端/客户端/测试/文档, 排除 node_modules 与 legacy)
+# → dist/ark-web-v3.0.4.zip (含扩展/服务端/客户端/测试/文档, 排除 node_modules 与 legacy)
 ```
 
 > 完整版本历史见 `CHANGELOG.md`; AI 使用手册见 `SKILL.md`。
@@ -300,11 +301,11 @@ node scripts/package.js
 |------|------|
 | `401: 缺少或错误的访问令牌` | HTTP 调用没带令牌。令牌在 **`~/.ark-web/token`**（Windows `Get-Content "$env:USERPROFILE\.ark-web\token" -Raw`）；**或直接用 CLI**（自动读取，永不 401） |
 | **`connected: true` 但命令全部超时** | **僵尸连接**（插件重载/浏览器休眠后残留的旧 WS）。v2.9.2 已内建自愈：超时自动换连接重试(8s) + 120s 静默自动清理 + `/status.connections[]` 可观测(`suspect:true` 即可疑)。仍不行就重启 server |
-| `connected: false` | 浏览器未开 / 插件未加载 → `chrome://extensions` 重新加载；夸克用户同理（夸克也支持加载解压扩展） |
+| `connected: false` | 浏览器未开 / 插件未加载 / 扩展 ID 尚未登记 → 先运行 `node scripts/label-browsers.js --yes`，再 `chrome://extensions` 重新加载；夸克用户同理 |
 | 命令报 unknown/error | 插件是旧版 → `node scripts/sync.js --yes` 同步后 `POST /reload-extension`（或手动重载插件） |
 | 调试功能报"需要 CDP" | `node client/browser-client.js debug-on`（等价 `POST /debug/attach-all`，无需点 popup）；插件重载后需重新授权 |
 | 插件版本与代码不一致 | `node scripts/doctor.js` —— 会列出所有副本、浏览器实际加载路径、插件上报版本 |
-| 端口占用 `localhost:9333` | 结束占用进程, 或换端口启动: `$env:BRIDGE_PORT=9335; node server\bridge-server.js`（改了 WS 端口需在插件 popup 填同值） |
+| 端口占用 `localhost:9333` | 结束占用进程, 或换端口启动: `$env:BRIDGE_PORT=9335; node server\bridge-server.js`；改了 WS 端口后在插件 popup 填同值 |
 | 夸克下个别 CDP 域不生效 | 已知差异（如 `setLocaleOverride` 被忽略，已用脚本注入兜底）；后台标签页截图已按夸克实测修正（首轮超时 1.5s + 最多 3 次重试，实测 10/10 成功）。device clear 视口残留已改为"写回原始视口"软还原。详见 `references/troubleshooting.md` |
 | 后台标签页截图慢/曾失败 | 已修复：夸克下首轮取帧可能超时（`fromSurface:false` 被内核拒绝），现为首轮 1.5s + 最多 3 次重试，实测 10/10 成功、平均 3.2s；失败时响应里的 `cdpError` 会带每次尝试的真实错误。带 `clip` 的 `zoom`/元素截图受内核限制，会自动降级并返回 `degraded` |
 | `wait-for-load` 返回 `partial:true` | 正常：页面第三方资源挂起（被墙/慢请求）导致 `load` 永不触发，v2.9.3 起超 `stallGrace`(默认 3s) 即按 DOM 就绪返回，可继续操作；确需等完整 load 可调大 `timeout` |
@@ -317,11 +318,11 @@ node scripts/package.js
 | 机制 | 行为 |
 |---|---|
 | 仅回环监听 | HTTP(9333) 与 WS(9334) 都绑 `127.0.0.1`，局域网设备无法访问。确需对外用 `BRIDGE_HOST=0.0.0.0`，**必须**同时设置 `ARK_TOKEN` |
-| 令牌鉴权 | 除 `GET /health` 外所有端点都要求 `X-Ark-Token` 头（或 `Authorization: Bearer`、`?token=`）。令牌首次启动自动生成写入 **`~/.ark-web/token`**(0600)，启动日志与 `/health` 都会给出路径；CLI 与测试脚本自动读取。多份项目副本共用同一令牌，避免"服务端与 CLI 令牌不一致"的 401 |
+| 令牌鉴权 | 除 `GET /health` 外所有 HTTP 端点都要求 `X-Ark-Token` 头（或 `Authorization: Bearer`、`?token=`）。令牌首次启动自动生成写入 **`~/.ark-web/token`**(0600)，启动日志与 `/health` 都会给出路径；CLI 与测试脚本自动读取。多份项目副本共用同一令牌，避免"服务端与 CLI 令牌不一致"的 401 |
 | Host 校验 | 拒绝非回环 Host → 挡 **DNS rebinding**（恶意域名解析到 127.0.0.1 后带自己的 Host 发请求） |
 | Origin 校验 + 精确 CORS | 仅接受无 Origin(CLI)、`chrome-extension://` 扩展页面、本机页面来源；回显具体 Origin，**不再使用 `Access-Control-Allow-Origin: *`** → 挡**任意网页 CSRF 操控浏览器** |
 | WS 来源校验 | **默认开启**：WebSocket 握手不受 CORS 约束，任意网页都能向 `ws://127.0.0.1:9334` 发起连接，因此默认拒绝一切 `http(s)://` 来源，只接受扩展页面与无 Origin 的本机进程。确需让本机页面走 WS 的老用法：`ARK_WS_ALLOW_LOCAL=1`（安全加固记录见 `CHANGELOG.md`） |
-| WS 令牌 | 设置 `ARK_TOKEN`(或 `ARK_WS_TOKEN`) 后，插件必须在 popup「连接配置」填入相同令牌，否则连接被拒 → 挡本机任意进程直连 9334 绕过 HTTP 鉴权 |
+| WS 令牌 | 本机已登记的 Ark Web 扩展可自动连接；其它本机进程或扩展必须提供 `~/.ark-web/token`；设置 `ARK_TOKEN` 或 `ARK_WS_TOKEN` 可覆盖 WS 令牌 |
 
 ```bash
 # 自定义令牌(可选)

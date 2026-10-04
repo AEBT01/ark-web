@@ -6,6 +6,7 @@
  */
 module.exports = [
   "GET  /health (免鉴权)",
+  "GET  /bootstrap (扩展自取令牌; 仅白名单扩展/本机进程; 网页来源 403)",
   "GET  /status",
   "GET  /tabs",
   "GET  /full",

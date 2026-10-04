@@ -2,7 +2,7 @@
 
 > 历史物料：v2.8–v3.0 初期的发布稿。安全模型（现已全面令牌鉴权）与端点数（现 154）已有变更，现行口径见 SKILL.md 与 README.md。
 
-> 原则：只写括号内确认过的特性（MV3 插件 CDP + 本地 Node 桥 localhost:9333、154 端点、snapshot+SoM、?session 隔离、30+ 维审计、batch 链式、device/media/network 模拟、MIT、v3.0.2 英文 README+Pages 站 https://aebt01.github.io/ark-web/ ），不确定的写"以仓库为准"。每条可直接复制回复。
+> 原则：只写括号内确认过的特性（MV3 插件 CDP + 本地 Node 桥 localhost:9333、155 端点、snapshot+SoM、?session 隔离、30+ 维审计、batch 链式、device/media/network 模拟、MIT、v3.0.2 英文 README+Pages 站 https://aebt01.github.io/ark-web/ ），不确定的写"以仓库为准"。每条可直接复制回复。
 
 ---
 
@@ -40,7 +40,7 @@ A：headless 是另起一个干净 Chromium：无登录态、指纹/字体/渲�
 
 ## Q9：耗资源吗？
 
-A：不另起浏览器进程，资源 ≈ 你的 Chrome 本身 + 一个轻量 Node 桥（HTTP 154 端点 + WebSocket）。对比"每个 agent 一个 Chromium"的方案反而更省：多智能体是 `?session` 共用一个 Chrome，标签页级隔离。snapshot 走二进制可省约 1/3 传输（以仓库为准）。机器太老的话，少开几个 session 即可。
+A：不另起浏览器进程，资源 ≈ 你的 Chrome 本身 + 一个轻量 Node 桥（HTTP 155 端点 + WebSocket）。对比"每个 agent 一个 Chromium"的方案反而更省：多智能体是 `?session` 共用一个 Chrome，标签页级隔离。snapshot 走二进制可省约 1/3 传输（以仓库为准）。机器太老的话，少开几个 session 即可。
 
 ## Q10：能商用吗？
 

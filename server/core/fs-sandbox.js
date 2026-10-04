@@ -79,6 +79,7 @@ function isInsideReal(abs) {
 
 /** 组合判定：字符串归一 + 真实路径（存在链接时也要拦住） */
 function resolveInside(p) {
+  try { fs.mkdirSync(FS_ROOT, { recursive: true }); } catch (e) { return null; }
   const abs = resolveSafe(p);
   if (!abs) return null;
   if (!isInsideReal(abs)) return null;

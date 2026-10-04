@@ -10,10 +10,10 @@
 | 文档里看到的 `server/.ark-token` | 那是**旧路径**（v2.9.1 之前）。现已统一为用户级共享令牌 `~/.ark-web/token`，多份项目副本共用同一个，避免服务端与 CLI 令牌不一致 |
 | `403: 请求被安全策略拒绝(Host=... 非回环地址)` | 用了非回环 Host（局域网 IP / 域名）→ 改用 `127.0.0.1` 或 `localhost`；确需外部访问要设 `BRIDGE_HOST=0.0.0.0` **且** `ARK_TOKEN` |
 | `403: ... Origin=... 不被信任` | 从第三方网页发起调用被拦（设计如此，防 CSRF）→ 用 CLI/curl 或本机页面 |
-| `插件未连接` / `connected: false` | ① 浏览器没开；② 插件没加载（`chrome://extensions` → 加载 `extension/`）；③ 插件 popup 显示未连接 |
-| 插件始终连不上 9334 | ① WS 端口与 server 不一致 → popup「连接配置」改成与 `BRIDGE_WS_PORT` 相同；② server 设了 `ARK_TOKEN` 但插件没填 → 填同一令牌；③ server 只监听回环，别填局域网 IP |
-| 插件日志 `invalid token` | popup 里的令牌与 `ARK_TOKEN` 不一致 → 复制 `~/.ark-web/token` 内容填入 |
-| server 重启后 `connected` 持续 false | SW 休眠重连未运行 → `chrome://extensions` 点「重新加载」；或重启浏览器 |
+| `插件未连接` / `connected: false` | ① 浏览器没开；② 插件没加载（`chrome://extensions` → 加载 `extension/`）；③ 扩展 ID 尚未登记 → 运行 `node scripts/label-browsers.js --yes`；④ popup 显示未连接 |
+| 插件始终连不上 9334 | ① WS 端口与 server 不一致 → popup「连接配置」改成与 `BRIDGE_WS_PORT` 相同；② 若不是本机已登记的 Ark Web 扩展，填入 `~/.ark-web/token`；③ server 只监听回环，别填局域网 IP |
+| 插件日志 `invalid token` | 非登记扩展或本机进程的令牌不正确 → 复制 `~/.ark-web/token` 内容填入 |
+| server 重启后 `connected` 持续 false | ① 确认 `GET /health` 返回 `ok:true`；② 确认 `browser-labels.json` 包含当前扩展 ID；③ `chrome://extensions` 点「重新加载」或重启浏览器 |
 
 ## 僵尸连接 ⭐（"显示已连接但命令全部超时"的头号原因）
 

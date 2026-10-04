@@ -13,6 +13,38 @@ module.exports = {
 
   routes: {
     /**
+     * /bootstrap —— 新装的扩展副本自取令牌（多实例零手动接入，2026-10-02 新增）
+     *
+     * 背景：每个隔离实例用独立的 user-data-dir + 独立的扩展副本（路径唯一⇒extId唯一）。
+     * 新 profile 里扩展的 chrome.storage 是空的 ⇒ 没有令牌 ⇒ 连不上 WS（wsTokenRequired）。
+     * 过去要人工在 popup 里粘贴令牌，n 个实例就要 n 次手工。
+     *
+     * 安全模型（与 WS 来源校验同源，见 bridge-server.isAllowedWsOrigin）：
+     *   · 无 Origin            → 本机进程（本来就能读令牌文件），放行
+     *   · chrome-extension://  → 必须在扩展白名单里（labelMap 含其 extId），放行
+     *   · http(s)://           → 网页，一律拒绝（WebSocket 不受 CORS 约束，HTTP 也不给）
+     * 该路由已从令牌校验里豁免（http-shell），但**来源校验比令牌更严**，不构成降级。
+     */
+    '/bootstrap': async function (__ark) {
+      const { req, send } = __ark;
+      const srv = __ark.server;
+      const origin = String((req && req.headers && req.headers.origin) || '');
+      if (origin && !srv.isTrustedExtensionOrigin(origin)) {
+        console.log('[ArkWeb] /bootstrap 拒绝来源: ' + origin);
+        return send(403, { error: '403: 仅白名单扩展或本机进程可获取令牌', origin: origin });
+      }
+      const labels = (() => { try { return Object.keys(srv.labelMap()).length; } catch (e) { return 0; } })();
+      return {
+        token: srv.authToken || '',
+        wsPort: srv.wsPort,
+        httpPort: srv.port,
+        wsTokenRequired: !!srv.wsTokenRequired,
+        labelMapSize: labels,
+        note: '把 token 存进 chrome.storage.local.arkWsToken 即可连接；连接名由扩展自行决定（manifest [名字] / popup / 内核名）',
+      };
+    },
+
+    /**
      * 能力自省清单 —— 单一事实来源的对外出口。
      * 界面、文档、自检都从这里取"服务能做什么"，不再各自维护副本。
      */

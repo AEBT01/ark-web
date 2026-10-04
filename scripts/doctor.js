@@ -143,7 +143,10 @@ function askServer() {
     report.actions.push('启动 server: node server/bridge-server.js');
   } else {
     report.server = { port: server.port, connected: server.connected, serverVersion: server.serverVersion, plugin: server.plugin || null, security: server.security || null, tokenSource: server.tokenSource };
-    if (!server.connected) report.problems.push('插件未连接到 server(WS 未建立)');
+    if (!server.connected) {
+      report.problems.push('插件未连接到 server(WS 未建立)');
+      report.actions.push('确认扩展已加载，并运行 node scripts/label-browsers.js --yes 登记本机扩展 ID');
+    }
     const localVer = report.copies.find(c => c.self)?.manifestVersion;
     if (server.plugin?.version && localVer && server.plugin.version !== localVer) {
       report.problems.push(`插件运行版本(${server.plugin.version}) ≠ 本地代码版本(${localVer}) —— 浏览器里跑的不是最新代码`);

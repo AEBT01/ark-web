@@ -221,6 +221,11 @@ function finish() {
   for (const f of failed) console.log('  ✗ ' + f.title + ' —— ' + (f.tail || '').slice(0, 200));
   for (const s of skipped) console.log('  ○ ' + s.title + '（未跑）');
   if (!failed.length) console.log('  ✓ 全部通过');
+  for (const child of [mockProc, serverProc]) {
+    if (child && child.pid) {
+      try { child.kill(); } catch {}
+    }
+  }
   process.exit(failed.length ? 1 : 0);
 }
 

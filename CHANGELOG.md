@@ -1,5 +1,26 @@
 # Changelog — Ark Web
 
+## v3.0.4 (2026-10-04) — v3.0.3 代码落库 + 生产线面板
+
+- **v3.0.3 特性代码入库**: 上条所述 `/bootstrap` 端点、扩展自动取令牌、manifest `[名字]` 自命名、多窗口隔离（SKILL §4.5）在 v3.0.3 仅记于文档，代码随本版一并入库。
+- **假一罚十生产线面板**: 扩展声明 `sidePanel` 权限；后台站点 content match 新增 `mms.pinduoduo.com`；manifest 描述同步。
+- **自检与排障**: `doctor.js` 在插件未连接时给出行动指引（先跑 `node scripts/label-browsers.js --yes`）；`verify-all.js` 退出时清理自启动的 mock/server 子进程；popup 提示语与 WS 令牌口径对齐（已登记扩展自动连接，其它连接填当前服务端令牌）。
+- **文档**: SKILL.md 升 v3.0.4（156 端点口径）；`references/protocol.md` 令牌说明补 WS 免填条件。
+
+## v3.0.3 (2026-10-02) — 多窗口隔离（多账号并联）
+
+- **`GET /bootstrap`（新）**: 新装的扩展副本自取令牌 —— 仅白名单 `chrome-extension://` 来源或无 Origin 的本机进程可获取，网页来源一律 403（与 WS 来源校验同源）。免去"每个实例手填令牌"。
+- **扩展自命名（新）**: `manifest.name` 带 `[名字]` 后缀时，`defaultLabel()` 用 `getManifest()` 同步解析为连接名（同产品多开也能各有独立标签）；`refineLabel` 对已自命名实例跳过面板探测，避免被误升级成 browseros。
+- **扩展自动取令牌（新）**: `loadWsConfig()` 在 storage 无令牌时向 `/bootstrap` 取一次并落盘。
+- **文档**: `SKILL.md` 新增 §4.5「多窗口隔离」——连接名优先级、三条硬约束（独立 user-data-dir / **零标签页即退出** / extId 必须登记）、隔离实例建法、`/bootstrap` 安全模型、排障表；README 环境依赖同步。
+
+## 未发布 — 连接与文档治理（2026-09-24）
+
+- WS 默认要求鉴权；本机已登记的 Ark Web 扩展通过 `browser-labels.json` 自动识别，其它连接仍需令牌。
+- 新增 `label-browsers.js --yes` 生成扩展 ID 白名单，避免把任意扩展来源当作可信连接。
+- 文件沙箱统一使用真实路径校验，拒绝符号链接逃逸；验证脚本退出时清理自启动的测试服务。
+- 文档同步更新启动、连接、鉴权、排障和端点数量说明。
+
 版本号以仓库根目录的 `VERSION` 为唯一来源，由 `node scripts/bump-version.js <版本>` 同步到
 扩展清单与服务端 package.json（两处不一致时打包会拒绝执行）。
 
