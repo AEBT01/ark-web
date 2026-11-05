@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Ark Web 自检夹具</title>
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; }
+  .item { border: 1px solid #ddd; padding: 8px; margin: 6px 0; }
+  .price { color: #c00; }
+  table { border-collapse: collapse; margin-top: 12px; }
+  th, td { border: 1px solid #ccc; padding: 4px 10px; }
+  #delayed { color: #666; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<h1 id="title">自检夹具</h1>
+<p class="intro">这个页面用于验证 Ark Web 的抽取、表格、交互与网络能力。</p>
+
+<div id="list">
+  <div class="item" data-id="1"><h3 class="name">Alpha</h3><span class="price">￥120</span><a class="link" href="/a">详情</a></div>
+  <div class="item" data-id="2"><h3 class="name">Beta</h3><span class="price">￥240</span><a class="link" href="/b">详情</a></div>
+  <div class="item" data-id="3"><h3 class="name">Gamma</h3><span class="price">￥360</span><a class="link" href="/c">详情</a></div>
+  <div class="item" data-id="4"><h3 class="name">Delta</h3><span class="price"></span><a class="link" href="/d">详情</a></div>
+</div>
+
+<table id="prices">
+  <caption>价格表</caption>
+  <thead><tr><th>名称</th><th>价格</th><th>库存</th></tr></thead>
+  <tbody>
+    <tr><td>Alpha</td><td>120</td><td>5</td></tr>
+    <tr><td>Beta</td><td>240</td><td>0</td></tr>
+    <tr><td>Gamma</td><td>360</td><td>12</td></tr>
+  </tbody>
+</table>
+
+<form id="form" onsubmit="event.preventDefault(); document.getElementById('echo').textContent = document.getElementById('kw').value;">
+  <input id="kw" name="kw" placeholder="关键词">
+  <select id="sel"><option value="a">选项A</option><option value="b">选项B</option></select>
+  <input id="file" type="file">
+  <button id="btn" type="submit">提交</button>
+</form>
+<div id="echo"></div>
+
+<button id="alertBtn" onclick="alert('fixture-alert')">弹窗</button>
+<button id="hoverBtn" onmouseenter="document.getElementById('tip').classList.remove('hidden')">悬停我</button>
+<div id="tip" class="hidden">悬浮提示已显示</div>
+
+<button id="mutateBtn" onclick="document.getElementById('echo').textContent='mutated'">改 DOM</button>
+
+<div id="coverbox" style="position:relative;display:inline-block">
+  <button id="coveredBtn" onclick="document.getElementById('coverlog').textContent='clicked'">被遮挡的按钮</button>
+  <div id="coverlayer" style="position:absolute;inset:0;background:rgba(0,0,0,.2)"></div>
+</div>
+<div id="coverlog"></div>
+
+<p id="delayed">等待中…</p>
+<script>
+  // 延迟出现，用于测试 wait
+  setTimeout(() => {
+    const d = document.getElementById('delayed');
+    d.textContent = '延迟内容已就绪';
+    d.id = 'delayedReady';
+  }, 800);
+
+  // 触发一次 XHR，用于测试 net 捕获
+  fetch('/api/ping').then(r => r.json()).then(j => {
+    document.body.dataset.ping = j.ok ? 'ok' : 'bad';
+  }).catch(() => {});
+</script>
+</body>
+</html>

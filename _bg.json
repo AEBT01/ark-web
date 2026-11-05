@@ -1,1 +1,0 @@
-{"code":"(() => JSON.stringify({ big: window.__big ? { done: window.__big.done, idx: window.__big.idx, unique: Object.keys(window.__big.map).length, elapsed: Math.round((Date.now() - window.__big.started) / 1000), throttled: window.__big.throttled, errs: window.__big.errs } : 'gone' }))()","timeout":12000}

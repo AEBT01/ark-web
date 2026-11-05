@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Ark Web Bridge",
+  "version": "5.1.0",
+  "description": "鏈湴娴忚鍣ㄦˉ鎺ワ細鎶婃爣绛鹃〉鑳藉姏缁?WebSocket 鏆撮湶缁?127.0.0.1:9333 鐨?bridge-server",
+  "permissions": [
+    "tabs",
+    "debugger",
+    "storage",
+    "scripting",
+    "alarms",
+    "tabGroups",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1:9333/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Ark Web Bridge"
+  },
+  "options_page": "options.html"
+}
+

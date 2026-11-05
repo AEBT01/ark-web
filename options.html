@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Ark Web Bridge — 状态</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.6 system-ui, "Segoe UI", sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #888; font-size: 12px; margin-bottom: 24px; }
+  .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #8882; }
+  .k { color: #888; }
+  .ok { color: #16a34a; font-weight: 600; }
+  .off { color: #dc2626; font-weight: 600; }
+  code { background: #8881; padding: 1px 6px; border-radius: 4px; }
+  ol { padding-left: 20px; }
+  li { margin: 6px 0; }
+</style>
+</head>
+<body>
+  <h1>Ark Web Bridge</h1>
+  <div class="sub">MV3 浏览器桥接 · bridge-server 127.0.0.1:9333</div>
+
+  <div class="row"><span class="k">桥接服务</span><span id="srv">检测中…</span></div>
+  <div class="row"><span class="k">扩展连接</span><span id="ext">—</span></div>
+  <div class="row"><span class="k">版本</span><span id="ver">—</span></div>
+
+  <h1 style="margin-top:32px;font-size:15px">使用步骤</h1>
+  <ol>
+    <li>终端运行 <code>node server/bridge-server.js</code></li>
+    <li>本页刷新，确认「扩展连接」为绿色</li>
+    <li>终端运行 <code>node client/browser-client.js status</code>，看到 <code>connected: true</code></li>
+    <li>之后即可 <code>tabs</code> / <code>open</code> / <code>snapshot</code></li>
+  </ol>
+  <p style="color:#888;font-size:12px;margin-top:24px">
+    令牌保存在 <code>~/.ark-web/token</code>（Windows 下由用户目录 ACL 保护），CLI 自动读取，无需手工填写。
+  </p>
+<script src="options.js"></script>
+</body>
+</html>

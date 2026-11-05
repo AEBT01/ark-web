@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Ark Web 探针页</title>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"探针商品","offers":{"@type":"Offer","price":"199.00","priceCurrency":"CNY"}}
+</script>
+<meta property="og:title" content="探针页 OG 标题">
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 24px; }
+  .menu .sub { display: none; }
+  .menu:hover .sub { display: block; }
+  .tall { height: 2200px; background: #f7f7f7; }
+  #farTarget { padding: 20px; background: #ffe; border: 2px solid #c00; }
+  .box { border: 1px solid #ccc; padding: 6px; width: 220px; margin: 8px 0; }
+  #options { display: none; border: 1px solid #999; width: 220px; margin-top: 2px; }
+  #options.open { display: block; }
+  #options div { padding: 4px 8px; cursor: pointer; }
+  #options div:hover { background: #eef; }
+</style>
+</head>
+<body>
+<h1 id="h">探针页</h1>
+
+<div class="menu" id="menu">
+  <button id="menuBtn">更多操作</button>
+  <div class="sub" id="sub"><a href="#sub1" id="subItem">子菜单项</a></div>
+</div>
+
+<div id="rt" contenteditable="true" class="box" style="min-height:56px">富文本初始内容</div>
+
+<div role="combobox" id="combo" tabindex="0" class="box" aria-expanded="false">请选择城市</div>
+<div id="options" role="listbox">
+  <div role="option" tabindex="0" data-v="bj">北京</div>
+  <div role="option" tabindex="0" data-v="sh">上海</div>
+  <div role="option" tabindex="0" data-v="gz">广州</div>
+</div>
+
+<select id="nat">
+  <option value="a">选项A</option>
+  <option value="b">选项B</option>
+</select>
+
+<iframe id="fr" width="340" height="100"
+  srcdoc="<input id='inFrame' placeholder='iframe 内输入框'><button id='frameBtn' onclick='window.__hit=1'>iframe 按钮</button>"></iframe>
+
+<div id="host"></div>
+
+<a id="blankLink" target="_blank" href="/?blank=1">新窗口链接</a>
+
+<div class="tall"></div>
+<div id="farTarget">滚动后截图目标 FAR-TARGET</div>
+<button id="farBtn">远处按钮</button>
+<div class="tall"></div>
+
+<button id="dangerBtn" onclick="document.getElementById('log').textContent='deleted'">提交订单</button>
+<button id="mutateBtn" onclick="document.getElementById('log').textContent='mutated'">改 DOM</button>
+<div id="log"></div>
+
+<form id="f" onsubmit="event.preventDefault();document.getElementById('echo').textContent=document.getElementById('kw').value">
+  <input id="kw" placeholder="关键词">
+  <button id="submitBtn" type="submit">提交</button>
+</form>
+<div id="echo"></div>
+
+<script>
+  const host = document.getElementById('host');
+  const sr = host.attachShadow({ mode: 'open' });
+  sr.innerHTML = '<button id="shadowBtn">Shadow 内按钮</button>';
+
+  const combo = document.getElementById('combo');
+  const options = document.getElementById('options');
+  combo.addEventListener('click', () => {
+    options.classList.toggle('open');
+    combo.setAttribute('aria-expanded', options.classList.contains('open') ? 'true' : 'false');
+  });
+  options.addEventListener('click', (e) => {
+    const opt = e.target.closest('[role=option]');
+    if (!opt) return;
+    combo.textContent = opt.textContent;
+    options.classList.remove('open');
+  });
+</script>
+</body>
+</html>

@@ -1,385 +1,279 @@
 ---
-name: ark-web
-description: Ark Web 浏览器扩展与 Bridge Server 的视觉操作实现：截图理解页面、元素编号操作、视觉 QA、渲染后页面与性能/可访问性审计。仅在用户明确选择 Ark Web 浏览器路线或需要这些视觉能力时使用；普通信息查询先用 ark-web seek，普通 BrowserOS/Neo 交互不由本技能负责。
+name: ark-web-browser
+description: Ark Web 浏览器子系统的完整手册（v5）。MV3 扩展 + 本地桥接 + 面向 AI 的 CLI。真实输入（CDP Input）、跨 iframe/shadow DOM 的元素采集、带指纹的 ref 注册表、语义快照与 diff、视觉编号截图、请求拦截与 HAR、Web Vitals、断言与录制回放。改代码自动热重载。
 ---
 
-# Ark Web — AI 浏览器控制技能 v3.0.4（视觉优先）
+# Ark Web 浏览器子系统 v5.1
 
-> 真实浏览器（Chrome / 夸克等 Chromium 内核）+ 真实鼠标键盘。工作方式是**看图决策**：先截图拿到页面与可交互元素编号，再按编号操作，不依赖猜测 CSS 选择器。
-## 路由边界
+> 这一版按「专业级 AI 浏览器操控与分析工具」重写：**先验证、再动作、后确认**，
+> 任何一步拿不到证据就报错，绝不回一个假的 `ok:true`。
 
-- 公开信息查询先用 `ark-web` 的 `seek` 子系统。
-- 需要视觉快照、元素编号、截图、渲染后内容、视觉 QA 或扩展审计时，才使用 Ark Web 浏览器子系统。
-- 普通登录、下载、表单和一般网页操作交给 BrowserOS Neo；不要在同一任务中无理由切换路线。
+## 一、它解决的是什么问题
 
-## 检索子系统引导：先查后逛（ark-web 内置 seek）
+给 AI 用的浏览器工具，难点不在「能不能点」，而在四件事：
 
-- **ark-web 技能 = 两个子系统**：`%USERPROFILE%\.agents\skills\ark-web\SKILL.md`（入口卡）。其中 **seek 检索子系统**（`ark-web\seek\`，完整手册 `SEEK.md`）直连 40+ 官方 API 免费检索（学术文献/网页/新闻/图片/专利/财报/数据集/行情/科学数据），快、稳、免登录、带缓存与 SSRF 防护——**凡是要"查信息"而不需要浏览器交互的，先走 seek，别开浏览器**。
-- **本仓 = 浏览器子系统**：浏览器交互、登录态页面、渲染后动态内容、视觉 QA、审计。
-
-```powershell
-& "$env:USERPROFILE\.agents\skills\ark-web\seek\scripts\lit.ps1" -Cmd search -Src openalex -Q "query" -N 10   # 学术
-& "$env:USERPROFILE\.agents\skills\ark-web\seek\scripts\web.ps1" -Cmd search -Src bing -Q "query" -N 10       # 网页/新闻/代码
-```
-
-- **典型降级链**：seek 检索（返回 `meta.failed` 如实报告）→ 场景属反爬/登录墙/无 API（OpenReview/Google Scholar/知网/百度学术/Google Patents 网页/反向图搜）→ 才用本仓只读浏览兜底。
-- 两子系统同一技能、同源安全红线（只读优先、登录墙/验证码如实报告并停止、不伪造结果）。
-
-## 0. 开工前自检（必做，30 秒）
-
-
-### 0.1 三条铁律
-
-1. **先 cd 到项目目录**（本手册所有相对路径都以它为准）：
-   ```powershell
-   cd "$env:USERPROFILE\browser-debug-extension"     # Windows
-   ```
-   ```bash
-   cd ~/browser-debug-extension                       # macOS / Linux
-   ```
-   本机固定位置就是这里；若你把仓库复制到别处（例如 agent 的技能目录），cd 到那一份即可。
-   首次加载扩展后运行 `node scripts/label-browsers.js --yes`，生成本机扩展 ID 白名单。
-   不想 cd 就用绝对路径调 CLI（`/health` 会返回该绝对路径）。
-
-2. **优先用 CLI**：`node client/browser-client.js`（或别名 `node ark.js`）**会自动读取令牌**，永不 401。
-   直接用 HTTP / curl 时才需要手工带令牌。
-
-3. **令牌位置**（不是 `server/.ark-token`，那是旧路径）：
-   ```powershell
-   Get-Content "$env:USERPROFILE\.ark-web\token" -Raw    # Windows
-   ```
-   ```bash
-   cat ~/.ark-web/token                                   # macOS / Linux
-   ```
-   所有 HTTP 请求带 `-H "X-Ark-Token: <令牌>"`（或 `Authorization: Bearer <令牌>`、`?token=<令牌>`）。
-   **唯一免鉴权端点**：`GET /health`。
-
-### 0.2 三步验证（复制即可）
-
-```powershell
-curl.exe -s http://127.0.0.1:9333/health                    # ① 免鉴权; 返回 connected/cli 绝对路径/令牌位置/推荐用法
-node client\browser-client.js status                        # ② 需令牌但 CLI 自动带 → 看 connected: true
-node client\browser-client.js tabs                          # ③ 能列出标签页即完全可用
-```
-
-`/health` 返回示例（**新接入的 AI 先读它，就知道该用什么命令、令牌在哪**；`cli` 实际输出当前运行 server 的绝对路径，会随部署位置变化，以下仅为示例）：
-
-```json
-{ "ok": true, "connected": true,
-  "cli": "<运行中 server 的绝对路径>\\client\\browser-client.js",
-  "tokenFile": "C:\\Users\\<你>\\.ark-web\\token", "tokenHeader": "X-Ark-Token",
-  "usage": { "preferred": "node \"...\\browser-client.js\" status   (CLI 会自动读取令牌, 推荐)" } }
-```
-
-服务没起时：`node server\bridge-server.js`（或 `start.bat` / `./start.sh`）。本机已登记的 Ark Web 扩展会自动连接；其它连接需把 `~/.ark-web/token` 填入插件 popup。
-
-### 0.3 连接异常速查（**先看这张表再怀疑代码**）
-
-| 症状 | 原因 | 处置 |
+| 难点 | 旧实现的失败方式 | v5 的做法 |
 |---|---|---|
-| `401: 缺少或错误的访问令牌` | 直接 HTTP 调用没带令牌 | 带上 `X-Ark-Token`；或改用 CLI（自动带） |
-| `插件未连接` / `connected: false` | 浏览器没开 / 插件未加载 / 扩展 ID 未登记 | 先运行 `node scripts/label-browsers.js --yes`，再打开浏览器 → `chrome://extensions` 加载 `extension/` → popup 点「启用调试」 |
-| **`connected: true` 但命令全部超时** | **僵尸连接**：插件重载或浏览器休眠后残留的旧连接 | ① 已内建自愈：超时会自动换连接重试（8s），120s 静默自动清理；② 仍不行则重启 server；③ 看 `/status` 的 `connections[]`（`suspect:true` 即可疑连接） |
-| 只有部分命令超时 | 页面被模态弹窗阻塞 / 渲染忙 | `GET /dialogs` 看弹窗；`POST /dialog {auto:true}`；`POST /tab/activate` 激活标签页 |
-| 命令报 `需要 CDP` | 调试授权过期（插件重载/浏览器重启后必失效） | `node client/browser-client.js debug-on`（等价 `POST /debug/attach-all`，**无需点 popup**） |
-| 夸克浏览器下行为差异 | 夸克内核（Chromium 套壳）个别 CDP 域不支持 | 见 `references/troubleshooting.md`「夸克 / 非 Chrome 内核」节；插件上报的 `browser` 字段可确认真实内核 |
+| **状态一致性** | ref 存在 DOM 属性上，重渲染后静默点到别的元素 | ref 只存在扩展侧注册表 + 指纹（tag+文本），对不上报 `E_STALE_REF` |
+| **输入真实性** | 合成事件，CSS `:hover` 不触发、`isTrusted=false` | 全部走 CDP `Input.*`，含「移动→重测→按下」防重排 |
+| **页面模型** | 扁平元素列表，iframe/shadow 全盲 | 跨 frame 注入代理，区域 + 上下文 + diff |
+| **可自证** | 动作完只回 `ok:true` | 回读校验（fill）、效果确认（click）、断言（assert） |
 
-## 1. 视觉工作流（核心）
+## 二、组成
 
-### 1.1 Snapshot —— 原子级视觉上下文 ⭐
-
-一次请求 = **截图 + 可交互元素锚点 + 页面元数据**。
-
-| 能力 | 端点 |
-|------|------|
-| 视觉快照 | `GET /snapshot?annotate=&full=&format=&quality=&maxElements=&selector=&fast=&compact=&settle=` · `POST /snapshot {同参数}` |
-| SoM 标注 | `?annotate=1` → 截图叠加 **1..N 编号气泡**，`elements[i].ref` 即气泡编号 |
-| 整页快照 | `?full=1`（布局/长页面用） |
-| **紧凑输出** | `?compact=1` → 元素变定长数组 `[ref,tag,role,x,y,w,h,flags,label]`，实测**元素 JSON 省 77~81%** |
-| **稳定后再拍** | `?settle=1` → 先等 DOM 稳定再采集，避免拍到"过渡态"（部分站点先渲染窄版再切桌面） |
-| 二进制直出 | `GET /snapshot/binary`（省 33% base64，锚点在 `X-Snapshot-Elements` 头） |
-| 放大读小字 | `POST /snapshot/zoom {ref｜selector｜x,y,width,height, scale, format}` |
-| **免截图读页面** | `POST /snapshot/text {minLen,max}` → 可见文本块 + 紧致坐标 + 字号 |
-| CLI | `node client\browser-client.js snapshot snap.png --annotate --compact --format webp` |
-
-返回结构（`compact` 关闭时）：
-
-```json
-{ "dataUrl": "data:image/webp;base64,...",
-  "url": "...", "title": "...",
-  "viewport": { "width": 1440, "height": 900, "dpr": 1, "scrollX": 0, "scrollY": 320 },
-  "elements": [
-    { "ref": 1, "tag": "BUTTON", "role": "button", "name": "登录", "text": "登录",
-      "rect": { "x": 620, "y": 412, "width": 96, "height": 36 },
-      "center": { "x": 668, "y": 430 }, "visible": true } ] }
-```
-
-`compact=1` 时 `elements` 为 `[ref,tag,role,x,y,w,h,flags,label]`，列定义见响应里的 `columns`。
-`flags` 字母：`d`=disabled、`c`=checked、`o`=occluded（被遮挡）、`v`=不在视口内、`f`=已填值。
-
-**元素字段里的决策信号**（对象格式下仅在非默认值时出现，便于省 token）：
-
-| 字段 | 含义与应对 |
+| 路径 | 作用 |
 |---|---|
-| `disabled` | 按钮不可用 → 别点，先满足前置条件 |
-| `checked` / `inputType` | 复选框已勾选 / 输入框类型（password 不回传值） |
-| `value` | 输入框已有内容（回读表单状态用） |
-| `inViewport: false` | 元素在视口外，截图里看不到 → 先 scroll 或直接用 `ref` 操作 |
-| `occluded: true` | 中心点被别的元素盖住（弹层/遮罩）→ 先关掉遮挡物再操作 |
-| `href` / `expanded` | 链接真实地址 / 折叠面板展开状态 |
+| `manifest.json` | MV3 清单（tabs / debugger / scripting / alarms / storage） |
+| `background.js` | service worker 入口：连接、消息分发、自更新 |
+| `src/page-agent.js` | 注入每个 frame 的页面代理（采集/定位/动作/断言/抽取），**同步 API** |
+| `src/frames.js` | 跨 frame 编排、ref 分配、注入守卫 |
+| `src/refs.js` | ref 注册表与指纹，落 `chrome.storage.session` |
+| `src/input.js` | CDP 真实输入：鼠标/键盘/文本/拖拽 |
+| `src/capture.js` | 截图（文档坐标 clip、焦点仿真、后台标签兜底） |
+| `src/observers.js` | 控制台/网络/WebSocket/弹窗/请求拦截 |
+| `src/cdp.js` | 调试器会话与焦点仿真 |
+| `src/commands.js` | 命令语义与错误码 |
+| `server/bridge-server.js` | HTTP+WS 桥接，:9333，令牌 + 扩展白名单 |
+| `client/browser-client.js` | CLI（42 个命令） |
 
-**参数默认值**：`format` png｜jpeg｜webp（**webp 最省 token，长任务建议显式指定**）；`maxElements` 默认 50（`fast:true` 时 30，上限 120）；同参数 **400ms 缓存**（命中 <5ms），写操作后自动失效，`?fresh=1` 强制刷新。
-窗口最小化/不可见时（`innerWidth=0`）**自动施加 1440×900 虚拟视口**并返回 `autoViewport`，截图与坐标操作照常可用。
-
-### 1.2 ref 操作 —— 推荐方式（无需坐标）
-
-拍完快照后，用编号直接操作。**刷新页面/滚动/元素位移都不会错位**，因为定位基于元素标记而非像素坐标。
-
-```
-POST /act { "action": "clickRef",  "ref": 3 }
-POST /act { "action": "hoverRef",  "ref": 7 }
-POST /act { "action": "fillRef",   "ref": 2, "value": "alice" }
-POST /act { "action": "readText",  "ref": 5 }          # 读完整文本/值/属性(小字读不清时比放大截图省 token)
-POST /act { "action": "zoom",      "ref": 5, "scale": 3, "format": "webp" }   # 裁剪放大, 读细节
-POST /act { "action": "find",      "text": "登录" }     # 按可见文本找元素, 返回 ref/坐标(可点击优先)
-POST /act { "action": "refs",      "steps": [{"op":"fill","ref":2,"value":"a"},{"op":"click","ref":3}] }  # 批量
-```
-
-`clickRef` / `fillRef` 还支持**后置等待**，把两次往返压成一次：`waitFor: 'load'｜'url'｜'text'｜'selector'`（配 `pattern`/`text`/`selector`、`waitTimeout`）。
-
-坐标操作仍可用（`elements[i].center` 与 `POST /mouse {type:"click", x, y}` 同坐标系，无需换算）：
-
-```
-POST /mouse { "type": "click", "x": 668, "y": 430 }
-```
-
-> 选择原则：**ref 优先**（稳、可读、抗滚动）；需模拟真实轨迹/拖拽/滚轮时用 `/mouse`；表单填值用 `fillRef` 或 `/fill`（React 兼容）。
-
-### 1.3 标准闭环
-
-```
-1. GET  /health 或 /status        # 连接确认
-2. POST /open {url}               # 或 {url, current:true} 复用当前标签页
-3. POST /wait-for-load            # 事件驱动, 别用 sleep; 页面有挂起资源时提前返回 partial:true(正常, 可继续); 再 POST /wait-for-stable 等 DOM 静默
-                                  # SPA / 数据驱动页面: 可加 POST /wait-for-idle {idleTime:500} 等网络真正空闲(比固定 sleep 稳)
-4. GET  /snapshot?annotate=1&compact=1&format=webp   # ← 看图决策
-5. POST /act {action:"clickRef", ref:N, waitFor:"load"}
-6. GET  /snapshot?compact=1       # ← 前后对比验证(或 readText 校值)
-7. POST /reset-all?tabId=         # 收尾: 恢复全部模拟 + 清理 ref 标记
-```
-
-一步到位的链式调用（一次 HTTP 往返）：
+## 三、启动
 
 ```powershell
-node client\browser-client.js chain "open https://example.com" "wait-load" "wait-stable" "snapshot s1.webp --annotate --compact --format webp" "click-ref 3" "snapshot s2.webp"
+cd "$env:USERPROFILE\browser-debug-extension"
+
+node scripts\label-browsers.js --yes   # 首次：登记扩展 ID（启用白名单）
+node server\bridge-server.js           # 桥接（计划任务 ArkWeb Bridge 开机自启）
+node client\browser-client.js status   # connected: true 即通
+node client\browser-client.js tabs
 ```
 
-### 1.4 交互铁律
+**加载扩展**：`chrome://extensions` → 开发者模式 → 加载已解压的扩展程序 → 选本目录。
 
-1. **先看再动**：导航/点击/输入后必先 snapshot 看真实渲染，不盲猜 DOM。
-2. **编号会过期**：`annotate` 的编号对应"最近一次快照"；页面变了就重新拍。
-3. **首屏用视口快照，长页面用 `?full=1`**；小字/图标含义读不清时用 `zoom`（`scale` 2-3 足够）或 `readText`。
-4. **遮挡先处理**：看到弹层/Toast/下拉 → 先 `key Escape`、点空白处或 `scroll`，再操作目标（`occluded` 字段会提示）。
-5. **表单双通道**：输入用 `fillRef`/`/fill`（原生 setter，React 兼容）；提交后 snapshot 看成功态。
-6. **验证用状态而非 sleep**：排序/翻页看 URL（`first=11`、`s=stars&o=desc`），登录看标题变化。
-7. **失败即数据**：登录墙/限流/验证码截图直接可见 → 如实记录，不伪造。
-8. **中文参数不进命令行**：PowerShell 5.1 会把中文转成 GBK 损坏。用 `--body-file kw.json`（UTF-8 无 BOM），或把中文写进 JSON 文件再 POST。
+> ### ⚠️ 重启桥接用 `server\restart.ps1`
+> 不要用 `Start-ScheduledTask 'ArkWeb Bridge'`——计划任务的动作直接跑 node.exe，
+> 且 `LogonType=Interactive`，每次启动都会在你当前会话弹一个黑窗（打游戏时会被打断）。
+> `restart.ps1` 会停任务 → 清残留 → `-WindowStyle Hidden` 拉起 → 自检 `/health`。
 
-### 1.5 成本与稳定性要诀（实测）
+## 四、命令表（42）
 
-| 场景 | 做法 | 实测收益 |
-|---|---|---|
-| 长任务省 token | 快照加 `compact=1&format=webp` | 元素 JSON **-77%~-81%**，图片 **-69%~-90%**，单次总载荷最高 **-90%** |
-| 页面刚加载完就拍 | 加 `settle=1`（或先 `POST /wait-for-stable`） | 避免拍到过渡态导致坐标全错 |
-| 窗口最小化/不可见 | **无需处理**：自动施加虚拟视口（视口任一维 <100 即触发，如最小化时夸克上报 45×14；仅影响该 tab），响应带 `autoViewport` | 最小化也能截图/点击 |
-| `wait-for-load` 返回 `partial:true` | 正常：DOM 已就绪但第三方资源挂起（被墙/慢请求），`load` 事件不再空等（超 `stallGrace` 默认 3s 即返回） | 直接继续操作；确需等完整 load 可调大 `timeout`/`stallGrace` |
-| 读到小字/图标含义 | 先 `POST /snapshot/text`；仍不够用 `POST /act {action:"zoom", scale:3}` | 免截图读页面，省 token |
-| 多标签页/多窗口 | CLI 加 `--tabId <id>` | 避免"打到活动标签页"漂移 |
-| 想省一次往返 | `clickRef` 带 `waitFor`；多步用 `refs` | 各省一次 HTTP |
-| 站点不可达 | 响应直接给 `目标标签页不可用于视觉采集: chrome-error://...`（不再空等 12s） | 快速失败，便于换站点 |
+### 标签页
 
-> 注意：**带 clip 的截图（`zoom` / `screenshot-element`）必须由合成器出图**，窗口最小化时可能超时（会返回 `degraded` 并降级为元素截图）；`/snapshot` 整屏截图已改用渲染进程出图（实测 ~0.5s）。
-
-## 2. 能力速查（156 端点）
-
-**⚡ = 需 CDP 调试授权**（未启用时自动降级为脚本模拟）
-
-| 域 | 端点 |
-|----|------|
-| 页面控制 | `POST /open {url, current?}` `/navigate` `/reload` `/back` `/forward` · `GET /tabs` · `POST /tab/activate` `/tab/close` · `/wait-for-load` `/wait-for-url` `/wait-for-text` · **`/wait-for-stable`** · `/batch` |
-| 视觉 | `GET/POST /snapshot`（`compact`/`settle`） · `/snapshot/binary` · `/snapshot/zoom` · **`/snapshot/text`** · `/act` · `GET /fast/snapshot` |
-| 自更新 | **`POST /reload-extension`**（改完 `extension/` 后让浏览器重载插件；重载后 CDP 授权失效需重跑 `/debug/attach-all`） |
-| 元素操作⚡ | `POST /act {clickRef,hoverRef,fillRef,readText,zoom,find,refs}` · `/mouse` · `/click` `/hover` `/dblclick` `/rightclick` `/drag` · `/scroll` `/scroll-into-view` `/scroll-by` · `/wait-for` |
-| 键盘输入⚡ | `POST /key` · `/type` · `/fill {fields:[{selector,value}]}`（React 兼容） · `/select` `/check` `/clear` `/focus` |
-| DOM 精确值 | `GET /page-info` `/dom` `/html` `/layout`⚡ · `POST /query` `/query-all` `/query-many` `/text` `/attr` `/value` |
-| JS 执行 | `POST /evaluate {code, timeout}` 支持 await，CSP 自动 bypass 重试 |
-| 截图/PDF⚡ | `GET /screenshot` `/screenshot/full` · `POST /screenshot/element` · `GET/POST /pdf` · `POST /upload` |
-| 网络 | `GET /network?filter=&limit=` · `POST /network/response {urlPattern}`⚡ · `/block` `/unblock` `/conditions` `/disable-cache` `/bypass-csp` |
-| 性能 | `GET /performance` `/vitals`（LCP/CLS/TTFB/FCP+FID+评级） `/resources` · `POST /cpu {rate}`⚡ |
-| 模拟⚡ | `POST /device {device}` `/device/clear` · `/media` · `/geo` · `/locale` `/timezone` · `/auto-dark` `/js` `/hardware-concurrency` |
-| 检查 | `GET /security` `/a11y` `/seo` |
-| 聚合 | `GET /full`（DOM+性能+Vitals+安全+a11y+seo，3s 缓存） · `GET /analyze-all` · `POST /monitor` → `/monitor/stop` `/monitor/status` |
-| Cookie/Storage | `GET /cookies` `POST /cookie` `/cookie/remove` · `GET /storage?type=` `POST /storage` `/storage/remove` `/storage/clear` |
-| 控制台 | `GET /console?limit=` `POST /console/clear` · `GET /dom-changes` |
-| 弹窗⚡ | `POST /dialog {accept, promptText, auto}` · `GET /dialogs` |
-| 调试/清理 | `POST /debug/attach-all` `/debug/detach-all` · `GET /health`（免鉴权） `/status` · `POST /reset-all?tabId=` |
-
-设备预设：iPhone 14 / 14 Pro Max / SE、iPad、iPad Pro、Pixel 7、Galaxy S23、Desktop，或自定义 `{width,height,dpr,mobile,userAgent}`。
-
-> 完整端点表、CLI↔插件命令映射、chain/batch 语法 → `references/protocol.md`
-
-## 3. 批量与速度
-
-```powershell
-node client\browser-client.js chain "open https://x" "wait-load" "snapshot s.webp --annotate --compact" "click-ref 2"
-node client\browser-client.js chain --body-file steps.json      # 复杂/中文步骤走 UTF-8 JSON 文件
-```
-
-- `/batch` 一次往返多步；步骤加 `data._parallel:true` 让连续只读块并行（3-5×）。
-- 只读端点有 1-5s 缓存（`/page-info` 2s、`/vitals` 5s、`/full` 3s），`?fresh=1` 绕过，`?ttl=<ms>` 自定义。
-- **反模式**：固定 sleep 等待（用 `wait-*`）、循环单查（用 `query-many` 或一次 `/full`）、相同参数重复拍 snapshot（有缓存）、看到小字就整页重拍（用 `zoom` + `readText`）。
-
-## 4. 多标签并行与会话隔离
-
-```
-POST /session/create → {sessionId}
-POST /session/tab {sessionId, url}      # 后台开页不抢焦点
-GET  /session                           # 会话 + tabIds
-POST /session/delete {sessionId, closeTabs:true}
-```
-
-带 `?session=<id>` 即进入隔离：越权访问他会话标签页返回 403；单 tab 会话免传 tabId，多 tab 会话必须显式 `?tabId=`；设备/媒体/弹窗策略均 per-tab 隔离。**任务结束必须清理**：会话用 `/session/delete`，共享标签页用 `/reset-all?tabId=`。
-
-## 4.5 多窗口隔离（多账号并联 / 多实例）—— 2026-10-02 实测定稿
-
-**场景**：同一台机器上开 N 个浏览器窗口，各登一个账号（每账号一份登录态），命令要能**定向**发到指定窗口。
-
-### 连接名（label）是怎么定的
-
-优先级（扩展 `background.js`，服务端 `bridge-server.js:314` 同序）：
-
-```
-① chrome.storage.local.arkLabel   ← popup 里手填的"连接名"（每个 profile 独立存储）★官方多开口子
-② manifest name 的 [名字] 后缀     ← 扩展副本自命名（getManifest() 同步读，零手动；见下）
-③ 查表 ~/.ark-web/browser-labels.json（extId|内核 → 标签）—— 服务端兜底，5s 缓存
-④ detectKernel()：UA 判内核（Quark→quark / Edg→edge / Chrome→chrome …）
-⑤ refineLabel()：本浏览器装了「Ark 助手」面板扩展 ⇒ 升级为 browseros
-```
-
-**官方口径 = 一个浏览器产品一个标签**：`scripts/label-browsers.js` 扫 6 种产品的 profile
-（BrowserClaw→browseros / Quark→quark / Chrome→chrome / Edge→edge / Chromium→chromium / Brave→brave），
-把路径含 `browser-debug-extension` 的扩展登记进表。**同产品多开在官方口径里不区分** ⇒ 要区分就得用 ① 或 ②。
-
-### 三个硬约束（缺一个就出问题）
-
-| # | 约束 | 后果 |
-|---|---|---|
-| ① | **每实例独立 `--user-data-dir`** | 共用则第 2 次启动只是"在原进程里开新窗口"⇒ 共用 cookie ⇒ 只能登一个账号 |
-| ② | **每实例至少留 1 个标签页** | **夸克零标签页 = 整个浏览器退出**（实测反复踩）；关标签前先留 `about:blank` 垫底 |
-| ③ | **扩展注册（extId）必须进白名单** | 服务端 `isTrustedExtensionOrigin` 拒绝未登记的来源 ⇒ 扩展**连不上**（现象：窗口开着但 `/status` 里没有它） |
-
-### 隔离实例的正确建法
-
-```powershell
-# 官方登记（新增浏览器产品副本后跑一次；同产品多开它区分不了，见上）
-cd $env:USERPROFILE\browser-debug-extension
-node scripts\label-browsers.js --yes
-
-# 隔离实例（本仓配套脚本，每跑一次多开一个合规实例）
-node tools\launch-instances.js --n=1 --label=iso1
-#   · 复制扩展到 ~\.ark-web\instances\acct1\panel（路径唯一 ⇒ extId 唯一）
-#   · 把连接名烤进副本 manifest：Ark Web [iso1]（机制 ②）
-#   · 清 profile 的 Service Worker 缓存（否则旧 SW 代码/旧连接名不生效）
-#   · 启动：quark.exe --user-data-dir=<独立> --new-window <起始页>
-#   · 读 Secure Preferences 拿 extId → 写 browser-labels.json（满足约束 ③）
-```
-
-**夸克注意**：**无视 `--load-extension`**（实测 profile 的 extensions.settings 为空，`--disable-features=DisableLoadExtensionCommandLineSwitch` 也无效）
-⇒ 首次必须在该窗口 `chrome://extensions` → 开发者模式 → **加载已解压的扩展程序** → 指向 `~\.ark-web\instances\acctN\panel`；
-之后注册持久化，以后启动自动带上。
-
-### 零手动接入：`GET /bootstrap`
-
-新 profile 的 `chrome.storage` 是空的 ⇒ 没有令牌 ⇒ 连不上 WS（`wsTokenRequired`）。扩展启动时自动向
-`http://127.0.0.1:9333/bootstrap` 取一次令牌并落盘（`arkWsToken`），**无需人工粘贴**。
-
-安全模型（与 WS 来源校验同源，不构成降级）：
-
-| 来源 | 结果 |
+| 命令 | 说明 |
 |---|---|
-| 无 Origin（本机进程） | 放行（本就能读令牌文件） |
-| `chrome-extension://<白名单 extId>` | 放行 |
-| `http(s)://`（任意网页） | **403 拒绝**（WebSocket 不受 CORS 约束，所以 HTTP 侧也不给） |
+| `status` | 桥接/扩展连接状态、扩展 ID、白名单条数 |
+| `tabs` / `info` / `activate` / `close` | 标签页管理 |
+| `open <url> [--tab-bg] [--capture false]` | 打开；默认先挂 CDP 再导航，首个请求也能抓 |
+| `session --mode open\|list\|close` | agent 自己的标签集合，可一键清理 |
 
-### 排障速查
+多浏览器同时连接时，`status` 返回每个扩展的 `browser` / `id` / `conn`；`tabs` 默认聚合全部浏览器并标注 `browser`/`extId`/`conn`。任意命令可用 `--ext <extId|chrome|edge>`、`--browser <名字>` 或 `--conn <连接键>` 指定目标；`fanout "<命令>"` 在所有浏览器并行执行。同一份扩展在 Chrome/Edge 的 extId 相同，精确区分用 `--browser` 或 `--conn`。
 
-| 现象 | 原因 | 处置 |
-|---|---|---|
-| 窗口开着但 `/status` 无该连接 | extId 未登记（约束 ③）或令牌缺失 | 跑 `label-browsers.js --yes`；确认扩展能访问 `/bootstrap` |
-| 两个窗口标签相同（如都是 `quark`） | 同产品多开 + 官方表按产品给标签 | 用 popup 手填连接名，或用本仓副本 manifest `[名字]` 机制 |
-| 改了 `background.js` 但行为不变 | **夸克缓存 Service Worker 脚本** | 删 `<profile>\Default\Service Worker` 后重启，或在扩展页「重新加载」 |
-| 改了 `extension/` 后 | 需在浏览器里**手动重载插件**；改 `server/` 后需**重启 server** | README「环境依赖」 |
+**没有默认标签这回事**：不传 `--tab` 且没有「最近操作过的标签」时，直接报 `E_NO_TAB`。
+旧版会回退到 `activeTab()`，等于在你正在写的页面上执行命令——这条已被删除。
 
-## 5. 弹窗
+### 观察
 
-默认 `autoAccept:true`：事件驱动同步自动确认，**不卡流程，无需预处理**。需人工决策时 `POST /dialog {auto:false}` → 交互命令返回 `{dialogPending:true}` → `POST /dialog {accept, promptText}` 应答；60s 无应答自动回退（防 agent 失联卡死用户页面）。
+| 命令 | 说明 |
+|---|---|
+| `snapshot [file] [--shot]` | 语义快照：跨 iframe/shadow 采集，带 `context`（所属区块）、`inView`、`disabled`。**默认只回结构不截图**（快一个数量级），要视觉快照加 `--shot` |
+| `snapshot --diff` | 与上次快照对比，只回 `added/removed/changed` |
+| `snapshot --in-view` | 只要当前视口内元素（长页面省 token） |
+| `snapshot --no-boxes` | 截图不带编号框（默认带：ref 直接烧进图里） |
+| `find --text "提交" [--role button]` | 语义定位，回 `clickable`/`coveredBy`/`score`/`why` |
+| `attr --ref N` | 元素全量属性、语义上下文、包围盒、遮挡情况 |
+| `text [--max-len N]` | 正文 → Markdown；聚合所有 frame（带 frame 分隔），覆盖 open shadow root |
+| `state` | 内嵌结构化数据：JSON-LD / `__NEXT_DATA__` / `__INITIAL_STATE__` / og:meta；主世界注入并跨 frame 聚合 |
+| `assert --selector "#x" --text "…"` | 断言 `text\|value\|attr\|count\|visible`，失败抛 `E_ASSERT` |
+| `eval "<js>"` | CDP `Runtime.evaluate`，等待 Promise |
 
-## 6. 审计引擎（30+ 维度加权评分）
+### 动作
 
-```powershell
-POST /audit {url?, budget?, format?: json|md|html, save?}    # 采集→5类加权评分→洞察→ROI 机会
-GET  /history?url=&limit=                                    # 趋势对比
-node client\browser-client.js audit-html report.html https://target
+| 命令 | 说明 |
+|---|---|
+| `click --ref N \| --selector "…"` | 遮挡/禁用/可见预检 → 真实点击 → 效果确认 → 新标签追踪 |
+| `click --force` | 跳过 ref 指纹与遮挡拦截（明确知道自己在做什么时才用） |
+| `fill --ref N --text "…"` | `Input.insertText`；`--type` 逐字符（联想/字数统计/富文本） |
+| `fill --submit` | 填完发真实 Enter（触发表单默认提交） |
+| `hover --ref N` | 真实 `mouseMoved`，回 `hoverActive` 证明浏览器认了这次悬停 |
+| `press --key "Ctrl+Enter"` | 真实按键，Tab/Escape/Enter 具备默认行为 |
+| `select --ref N --values "a,b"` | 原生 select 直选；自定义下拉自动「点开→按文本点选项」 |
+| `scroll --dy 600` / `shot <file> [--selector]` / `upload --file` | 滚动 / 截图 / 文件上传 |
+| `shot --diff` | 与上一次同目标截图比较，回 `changedPct` 与变化区域（视觉回归） |
+| `dialog --policy accept` | JS 弹窗策略（默认 `manual` 只记录，会阻塞页面） |
+| `emulate --device iphone --network slow3g --cpu 4 --media dark` | 环境模拟：设备/网络/CPU 降速/暗色与减弱动效/时区/语言/地理；`--reset` 还原 |
+
+### 采集
+
+| 命令 | 说明 |
+|---|---|
+| `extract --selector "…" --fields "…"` | 单页抽取，跨 shadow DOM |
+| `extract … --paginate --next "a.next"` | 翻页采集：跨页去重、`stopReason` 说明为什么停 |
+| `extract … --scroll 6 --step 700` | 无限滚动 / 虚拟列表采集 |
+| `table [--selector] [--out f.csv]` | HTML 表格 → 对象数组；展开 rowspan/colspan，多行表头合并 |
+| `net [--errors] [--filter kw]` | 请求清单（含 postData），只含挂载后发出的 |
+| `net-body <requestId>` | 响应正文 |
+| `net-intercept [--on false]` | 请求拦截开关（`Fetch.enable`） |
+| `net-rule --add '{...}'` | `mock` / `abort` / `delay` / `header` 规则 |
+| `net-har --out h.har` | 导出 HAR 1.2，默认含响应正文（`--no-bodies` 可跳过，`--max-body` 限长） |
+| `perf` | 节点/布局/JS 堆 + TTFB/FCP/LCP + **CLS/INP/LongTask/LCP 元素归属** + 资源分布 |
+| `console [--level error]` | 控制台日志与未捕获异常 |
+| `coverage --mode start\|stop` | JS/CSS 覆盖率：哪些代码根本没跑（导航前 start 才能覆盖整页） |
+
+### 组合
+
+| 命令 | 说明 |
+|---|---|
+| `wait --selector\|--text\|--url` | 等元素/文字/URL |
+| `wait-idle` | 等在途请求归零（SPA 比 wait-load 可靠） |
+| `chain "cmd1" "cmd2" --tab N` | 串联；顶层 `--tab` 会透传给每一步 |
+| `replay flow.jsonl --tab N` | 回放录制的流程（`ARK_WEB_RECORD=flow.jsonl` 录制） |
+| `fanout "<命令>" [--ext chrome,edge]` | 在每个浏览器并行执行同一条命令，返回分浏览器结果 |
+| `cdp <method> --params '{...}'` | CDP 直通（页面级域） |
+
+## 五、输出契约
+
+```
+成功  {"ok":true,  "cmd":"extract", "schemaVersion":2, "data":{...}, "elapsedMs":84}
+失败  {"ok":false, "cmd":"extract", "schemaVersion":2,
+       "error":{"code":"E_STALE_REF","message":"…","hint":"…","retryable":true}, "elapsedMs":61}
 ```
 
-评分构成：性能 30% / 可访问性 20% / 安全 20% / SEO 15% / 资源效率 15%（阈值参考 Lighthouse）。返回含 `scores`、`insights`（确定性根因）、`opportunities`（ROI 排序+预估节省）、`ai`（AI 可读紧凑格式）。
-工作流：`{save:true}` 审计 → 读 `ai` 字段出修复方案 → 修复后重审 + `/history` 对比；可叠加 `GET /snapshot?full=1` 作定性证据。
+- `--json` 或 `ARK_WEB_JSON=1` 打开机器模式（AI 应当始终打开）
+- `elapsedMs` 是桥接测得的真实往返耗时；`retryable` 表示「换个前置动作重试可能成功」
+- 列表结果一律带 `count` / `returned` / `truncated`
+- `hint` 是**可直接照做的修复动作**，不是解释
+- **`data` 整包透传**：内层不得为了「输出好看」裁剪字段（曾经因为多层各自挑字段，
+  截图的 `uniform` 标记被吃掉）。白名单只允许在最外层做一次
 
-## 7. 安全与配置
+### 错误码
 
-| 机制 | 说明 |
-|---|---|
-| **仅回环监听** | HTTP/WS 都绑 `127.0.0.1`，局域网设备无法访问（确需对外用 `BRIDGE_HOST=0.0.0.0`，**必须**同时设 `ARK_TOKEN`） |
-| **令牌鉴权** | 除 `/health` 外所有端点需 `X-Ark-Token` / `Authorization: Bearer` / `?token=`。令牌在 **`~/.ark-web/token`**（Windows：`%USERPROFILE%\.ark-web\token`），0600 权限；启动日志与 `/health` 都会给出路径 |
-| **Host 校验** | 拒绝非回环 Host → 挡 DNS rebinding |
-| **Origin 校验** | 仅接受无 Origin（CLI）、浏览器扩展页面、本机页面来源；**不回显 `ACAO: *`** → 挡任意网页 CSRF 操控浏览器 |
-| **WS 令牌** | 本机已登记的 Ark Web 扩展可自动连接；其它本机进程或扩展必须提供 HTTP 鉴权令牌 |
+| 码 | 含义 | 典型处置 |
+|---|---|---|
+| `E_PARAM` | 参数错误（本地就拦下，不浪费往返） | 按 hint 改参数 |
+| `E_NO_TAB` | 没有目标标签 | `open` 或加 `--tab` |
+| `E_UNKNOWN_REF` | ref 不存在（导航后最常见） | 重跑 `snapshot` |
+| `E_STALE_REF` | ref 指向的元素语义已变 | 重跑 `snapshot`；确认无误用 `--force` |
+| `E_NOT_FOUND` / `E_NOT_VISIBLE` / `E_DISABLED` / `E_COVERED` / `E_OFFSCREEN` | 元素不可用 | 关浮层 / 展开父级 / 滚动到可见 |
+| `E_FILL_FAILED` | 填写后回读校验不通过 | 加 `--type` 逐字符 |
+| `E_SELECT_FAILED` | 自定义下拉没找到选项 | 先 `snapshot` 看展开后的列表 |
+| `E_ASSERT` | 断言失败 | 前置动作没生效，或断言条件写错 |
+| `E_TAB_HIDDEN` | 后台标签没有新帧 | `activate` 或加 `--focus` |
+| `E_EXT_DOWN` | 扩展连接断开 | 重试；桥接会自动重连 |
+| `E_BRIDGE_DOWN` | 桥接没起 | 启动 `bridge-server.js` |
 
-```powershell
-$env:ARK_TOKEN='my-strong-token'; node server\bridge-server.js   # 自定义令牌(可选; 不设则自动生成)
-node client\browser-client.js status                              # CLI 自动读令牌
-curl.exe -H "X-Ark-Token: $(Get-Content "$env:USERPROFILE\.ark-web\token" -Raw)" http://127.0.0.1:9333/status
+## 六、几处关键设计
+
+### 1. ref 不是 DOM 属性，是注册表 + 指纹
+
+旧版把 `data-ark-ref` 写进页面，污染样式与框架 diff，且重渲染后会静默点到别的元素。
+v5 里 ref 只活在扩展侧（`chrome.storage.session`），每条记录带 `tag + 文本指纹`：
+
+```
+点击 → 找到 ref 对应元素 → 重新读 tag/文本 → 与指纹比对 → 不一致就报 E_STALE_REF
 ```
 
-⚠️ `ARK_NO_AUTH=1` 可关闭鉴权（兼容旧用法）：此时本机任意进程与任意网页都能操控浏览器，**仅在完全可信环境使用**。
+代价是「动态文本」元素（倒计时、计数器）会误报，所以留了 `--force` 逃生口。
 
-**配置项**
+### 2. 真实输入，且防重排
 
-| 环境变量 | 默认 | 说明 |
+`hover` 用 `Input.dispatchMouseEvent(mouseMoved)` 驱动真正的 `:hover`；
+`click` 的序列是 **移动 → 重新测量 → 按下 → 抬起**。
+中间那步「重新测量」很关键：悬浮菜单收起、吸顶条下沉都会让元素跳位，
+不重测就会点在上一帧的坐标上（实测踩过）。
+
+### 3. 跨 iframe 与 shadow DOM
+
+页面代理注入到**每个 frame**（`allFrames: true`，跨域也覆盖），每个 frame 自己遍历 open shadow root。
+主文档与子框架的元素在调用方看来完全一样：同一套 ref、同一套命令。
+
+坐标换算：同源 frame 由 `window.frameElement` 链累加偏移；跨域 frame 改由 CDP 补几何——
+`Page.getFrameTree` + `DOM.getFrameOwner` + `DOM.getBoxModel` 拿到 iframe 在父文档中的位置，
+减去父 frame 滚动量后逐层累加。**click / fill / hover 共用同一套跨域几何兜底**（`via: "cdp"`），
+只有在几何拿不到时（如 frame 未出现在 frame tree）才退回合成事件并如实标 `via: "synthetic"`；
+元素截图也使用同一偏移，iframe 内元素不会再截到主页面空白区。
+
+frame 会动态出现：每次调用前用「小探针 + 只补缺的」方式保证新 iframe 也有代理，
+不会因为「注入过就跳过」而对后插入的 frame 失明。
+
+### 4. 焦点仿真：被遮挡的窗口也能操作
+
+浏览器窗口被 IDE 挡住时，Chrome 把页面标成 `visibilityState=hidden`——
+于是 CDP 输入被丢弃、截图拿不到新帧、rAF 被节流。
+检测到 hidden 就发 `Emulation.setFocusEmulationEnabled`，让页面「相信」自己可见。
+（这解释了早期「命令成功但页面毫无反应」的诡异现象。）
+
+### 5. 截图：坐标、编号、后台、emulation
+
+- 元素截图的 `clip` 必须用**文档坐标**（视口坐标 + `scrollX/Y`），否则页面一滚就截到空白
+- 默认把 ref 编号画进截图（`position:fixed` 覆盖层，截完即删），视觉模型才有锚点
+- 后台标签 8 秒超时前就判断 `visibilityState`，直接给 `E_TAB_HIDDEN` 而不是干等
+- 纯色帧（滚动竞态下渲染器没出帧）自动重试两次；仍纯色则结果带 `uniform: true` 返回，不误报成功
+- 截图不再把 390px 的移动端模拟误判为“窗口过小”；已有的 `emulate` 设备指标会保留并在临时覆盖后恢复
+- 默认不抢焦点；只有显式 `--focus` 才聚焦窗口
+
+### 6. 并发、审计与脱敏
+
+- **同 tab 串行**：命令按 `tabId` 在 service worker 里排队，避免 `click` 与 `snapshot` 并发
+  竞争 ref 注册表与输入焦点；不带 tab 的命令（status/tabs/open）保持并行。
+- **审计**：桥接把每条命令写入 `~/.ark-web/logs/audit.jsonl`（时间 / 命令 / 参数摘要 / 成败 / 耗时，
+  5MB 轮转）。嵌套参数、URL query、`text`/`file`/`body`/token/password 等敏感键深度脱敏，
+  `code` 只保留截断。
+- **脱敏**：`input[type=password]` 的值在快照、属性、断言、fill 返回值里一律返回 `••••••`；
+  fill 的匹配校验在页面内完成，不把明文带回扩展侧。
+- **扩展通道**：ID 白名单 + `~/.ark-web/ws-secret` 共享密钥；未完成 hello 的连接不进入可用表，
+  响应必须来自请求实际发送到的连接；白名单文件损坏时 fail-closed。
+
+## 七、自检
+
+```powershell
+npm test                         # 三套全跑
+node test\selftest.js            # 49 项：基础回归（连接/抽取/表格/表单/翻页/错误码）
+node test\verify.js              # 45 项：专项验收（跨边界/跨域真输入/真实悬停/富文本/指纹/拦截/截图/覆盖率/模拟/视觉差异）
+node test\regression.js          # 41 项：修复回归（跨 frame text/state/upload、HAR 正文、rowspan、多浏览器、密码/ref/WS 等）
+node test\selftest.js -k extract # 只跑名字含 extract 的项
+```
+
+两套都自带夹具服务、不依赖外网，退出码 0 即全绿。`verify.js` 覆盖的是这一版修掉的缺陷，
+改任何与元素、输入、截图相关的东西都应该跑它。
+
+夹具：`test/fixture.html`（通用）、`test/probe.html`（专项：iframe、shadow、富文本、
+自定义下拉、长页面、target=_blank、JSON-LD）。
+`test/` 在热重载指纹排除表里，改测试不会触发扩展重载。
+
+## 八、已知限制（诚实清单）
+
+- **只支持 Chromium 系**（Chrome / Edge）
+- 网络/控制台缓冲上限 800 条/标签页；最近 200 条落 `storage.session`（30 分钟时效），
+  SW 被回收或扩展重载后仍能接回历史；落盘副本移除 Cookie/Authorization 头
+- `coverage` 只能统计 `start` 之后编译的脚本：要覆盖整页，请在导航前 `coverage --mode start`（已加载页面可先 `eval "location.reload()"`）
+- 截图在窗口被遮挡/最小化时**不再盲等**：分级探测（900→2500→8000ms）后直接给 `E_TAB_HIDDEN`/`E_OCCLUDED`，最坏约 3.5 秒
+- 后台标签（`--tab-bg`）截图受 Chrome 合成节流：实测前台约 0.4s、后台约 3.5s；要快就先 `activate`
+- 因此 `snapshot` 默认不截图：AI 的常规循环（看结构 → 定位 → 动作）不付出截图代价
+- 跨域 iframe 走 CDP 真输入需要多算一次 frame 几何（约 50-100ms）；个别 OOPIF 不在 frame tree 里时仍会退回合成点击
+- `extract` 只支持 CSS 选择器；虚拟列表需配合 `--scroll` 分轮采集
+- `text` / `state` 会聚合可注入 frame；sandbox 到完全无法注入的 frame 会跳过并保留主文档结果
+- `upload` 支持主文档、iframe、open shadow root 内的 file input；极端 OOPIF 若 DOM 树不可见会明确报错
+- `table` 的 rowspan/colspan 以“重复填充”展开；合并单元格的语义标签不做额外推断
+- 多浏览器同时连接时：`tabs` 默认聚合；普通命令用 `--ext`/`--browser` 指定；`fanout` 可并行；只给 `--tab` 时会自动反查所属浏览器，同号冲突则要求显式指定
+- 元素截图已支持 iframe 偏移；几何完全拿不到的极少数 OOPIF 会明确报错而不是截空白
+- 请求拦截开启后，`Fetch` 会暂停所有请求直到被放行；用完记得 `net-intercept --on false`
+- 无 Lighthouse 级审计（`perf` 是 CDP metrics + Performance API）
+- `chrome://`、扩展商店、PDF 内嵌等特权页不可操作
+- 弹窗默认 `manual` 不自动处理——脚本里要显式设策略，否则页面会卡住
+- `cdp` 直通只能发**页面目标**的方法，`Browser.*` 这类浏览器级域不可用
+
+## 九、排障
+
+| 现象 | 原因 | 处理 |
 |---|---|---|
-| `BRIDGE_PORT` | 9333 | HTTP API 端口 |
-| `BRIDGE_WS_PORT` | 9334 | WebSocket 端口（改了需在插件 popup「连接配置」填同值） |
-| `BRIDGE_HOST` | 127.0.0.1 | 监听地址（改 `0.0.0.0` 必须配 `ARK_TOKEN`） |
-| `ARK_TOKEN` | 自动生成 | HTTP/WS 访问令牌（存 `~/.ark-web/token`） |
-| `ARK_NO_AUTH` | — | `=1` 关闭鉴权（不安全） |
-| `ARK_PORT` / `ARK_HOST` | — | 客户端侧（CLI/脚本）连接参数 |
+| `connected: false` | 扩展没加载 / 桥接没起 | 起桥接，再看 `chrome://extensions` 图标 |
+| 被桥接拒绝（badge `!`） | 扩展 ID 不在白名单 | `node scripts\label-browsers.js --yes` |
+| 命令成功但页面没反应 | 窗口被遮挡，页面被判 hidden | v5 已自动焦点仿真；仍失败则 `activate` 或 `shot --focus` |
+| `E_STALE_REF` 频繁 | 页面在持续重渲染 | 每一步前 `snapshot --diff`，或用 `--force` |
+| 改了代码没生效 | 热重载护栏（2 分钟 3 次） | `node scripts\reload.js`（手动重载不受护栏限制） |
+| 截图空白 | clip 用了视口坐标 | v5 已修；确认 `shot` 的 `clip.y` 与页面滚动一致 |
+| 填了但校验不过 | 富文本/联想输入 | 加 `--type` 逐字符 |
 
-插件侧连接（主机/端口/令牌）在 **popup → 工具 → 连接配置** 修改并持久化。
+## 十、与技能卡的关系
 
-## 8. 故障排查
-
-常见症状与处置见 `references/troubleshooting.md`（连接/僵尸连接/鉴权/CDP/夸克内核差异/点击无效/拖拽/中文编码/限流登录墙/弹窗 等 50+ 条）。
-
-## 参考文档
-
-| 文件 | 何时读 |
-|---|---|
-| `references/protocol.md` | 查完整端点表、CLI↔插件命令映射、chain/batch 语法 |
-| `references/troubleshooting.md` | 出问题时（连接、鉴权、夸克内核、编码…） |
-| `references/evaluate-recipes.md` | 需要穿透 Shadow DOM / React / Monaco / 拦截 WebSocket 时 |
-
-## 版本
-
-- 运行时版本以 `extension/manifest.json` 为准（本手册对应 v3.0.4）；`/status` 会同时给出 **server 版本**与**插件上报版本**，两者不一致说明浏览器里跑的不是最新代码。
-- 改了 `extension/` 后：`node scripts/sync.js --yes` → `POST /reload-extension` → `POST /debug/attach-all`；新增浏览器副本后重新运行 `node scripts/label-browsers.js --yes`。
-- 历史见 `CHANGELOG.md`；环境体检 `node scripts/doctor.js`。
+`ark-web` 技能卡的「浏览器子系统真源」指向本目录：`C:\Users\24584\browser-debug-extension`。
+检索侧（`seek/`）与本子系统互补：**只用一次批量检索走 seek，要看/点/填/抓页面走这里**。

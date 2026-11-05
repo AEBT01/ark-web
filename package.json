@@ -1,0 +1,24 @@
+{
+  "name": "ark-web-browser-extension",
+  "version": "5.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ark Web 娴忚鍣ㄦˉ鎺?v5锛歁V3 鎵╁睍 + 鏈湴 bridge-server + 闈㈠悜 AI 鐨?CLI",
+  "scripts": {
+    "server": "node server/bridge-server.js",
+    "status": "node client/browser-client.js status",
+    "tabs": "node client/browser-client.js tabs",
+    "label": "node scripts/label-browsers.js",
+    "test": "node test/selftest.js && node test/verify.js && node test/regression.js",
+    "test:selftest": "node test/selftest.js",
+    "test:verify": "node test/verify.js",
+    "test:regression": "node test/regression.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
+

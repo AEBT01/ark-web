@@ -1,1196 +1,1578 @@
 #!/usr/bin/env node
 /**
- * Ark Web — Client v3 (唯一 CLI + API 库)
- * AI 终端使用的浏览器控制客户端: HTTP keep-alive、链式 batch、全部端点
+ * Ark Web 浏览器 CLI —— 面向 AI 的接口（v5.0）
  *
- * 用法:
- *   node browser-client.js <command> [args]
- *   node browser-client.js chain "cmd args" "cmd2 args" ...   (链式, 一次 HTTP 往返)
- *   node browser-client.js help
+ * 设计原则：
+ *   1. 稳定 envelope：成功 {ok:true, cmd, data}；失败 {ok:false, cmd, error:{code,message,hint}}
+ *   2. 自描述：describe 返回全部命令 schema，AI 无需读文档即可发现能力
+ *   3. token 经济：列表类结果一律带 count/returned/truncated，截断必须显式
+ *   4. 可自愈：错误带 code + hint，参数错误在本地就拦下，不浪费一次往返
+ *   5. 无交互：绝不等待 stdin、绝不弹确认
+ *
+ * 输出模式：默认人读文本；--json 或 ARK_WEB_JSON=1 输出 envelope（AI 用这个）。
  */
 
-const http = require('http');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import os from 'node:os';
+import path from 'node:path';
 
-const keepAliveAgent = new http.Agent({ keepAlive: true, maxSockets: 20, keepAliveMsecs: 8000, maxFreeSockets: 10, timeout: 45000 });
-keepAliveAgent.on('free', () => {}); // 占位，避免 freeSockets 泄漏告警
+const VERSION = '5.1.0';
+const BASE = process.env.ARK_WEB_BASE || 'http://127.0.0.1:9333';
+const TOKEN_FILE = path.join(os.homedir(), '.ark-web', 'token');
+const SELF = fileURLToPath(import.meta.url);
 
-/** 统一的连接参数解析: 显式参数 > 环境变量 > 令牌文件(优先 ~/.ark-web/token) > 默认值
- *  server 默认绑定 127.0.0.1 并启用令牌鉴权, 因此客户端默认也要带上令牌。 */
-function resolveConnection(overrides = {}) {
-  const host = overrides.host || process.env.ARK_HOST || '127.0.0.1';
-  const port = parseInt(overrides.port || process.env.ARK_PORT || process.env.BRIDGE_PORT || '9333', 10) || 9333;
-  let token = overrides.token || process.env.ARK_TOKEN || null;
-  let tokenSource = token ? '参数/环境变量' : null;
-  if (!token) {
-    const candidates = [
-      // 用户级共享令牌(多份项目副本共用同一个, 避免"服务端/CLI 令牌不一致"的 401)
-      path.join(os.homedir(), '.ark-web', 'token'),
-      path.join(__dirname, '..', 'server', '.ark-token'),
-      path.join(process.cwd(), 'server', '.ark-token'),
-      path.join(process.cwd(), '.ark-token')
-    ];
-    for (const f of candidates) {
-      try {
-        const t = fs.readFileSync(f, 'utf8').trim();
-        if (t) { token = t; tokenSource = f; break; }
-      } catch { /* 文件不存在则继续尝试下一个 */ }
-    }
+// ── 基础设施 ───────────────────────────────────────────────────────────────
+function token() {
+  if (process.env.ARK_WEB_TOKEN) return process.env.ARK_WEB_TOKEN.trim();
+  if (!existsSync(TOKEN_FILE)) {
+    const e = new Error(`找不到令牌文件 ${TOKEN_FILE}`);
+    e.code = 'E_TOKEN';
+    e.hint = '先启动 server/bridge-server.js 生成令牌';
+    throw e;
   }
-  return { host, port, token, tokenSource };
+  return readFileSync(TOKEN_FILE, 'utf8').trim();
 }
 
-class BrowserClient {
-  constructor(options = {}) {
-    const conn = resolveConnection(options);
-    this.host = conn.host;
-    this.port = conn.port;
-    this.token = conn.token;
-    this.tokenSource = conn.tokenSource;
-    this.baseUrl = `http://${this.host}:${this.port}`;
-    this.session = options.session || null;
-    // 固定目标标签页(等价于每个请求都带 ?tabId=) —— 多标签页环境下确定性定位
-    this.tabId = options.tabId != null ? options.tabId : null;
-  }
-
-  /** 统一构造请求头(自动携带访问令牌) */
-  headers(extra = {}) {
-    const h = { ...extra };
-    if (this.token) h['X-Ark-Token'] = this.token;
-    return h;
-  }
-
-  // ============ HTTP (keep-alive) ============
-
-  async request(pathName, options = {}) {
-    return new Promise((resolve, reject) => {
-      const url = new URL(pathName, this.baseUrl);
-      // 会话参数: 所有请求自动携带 ?session=<id>(多 agent 并行隔离)
-      if (this.session) url.searchParams.set('session', this.session);
-      // 目标标签页: 多标签页环境下避免"打到活动标签页"的漂移
-      if (this.tabId != null && !url.searchParams.has('tabId')) url.searchParams.set('tabId', this.tabId);
-      const method = options.method || 'GET';
-      const body = options.body;
-      const timeout = options.timeout || 60000;
-
-      const req = http.request({
-        hostname: url.hostname,
-        port: url.port || this.port,
-        path: url.pathname + url.search,
-        method,
-        agent: keepAliveAgent,
-        headers: body ? this.headers({ 'Content-Type': 'application/json' }) : this.headers(),
-        timeout
-      }, (res) => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          let parsed;
-          try { parsed = JSON.parse(data); }
-          catch { parsed = { raw: data }; }
-          if (res.statusCode === 401 && !parsed.hint) {
-            parsed.hint = '访问令牌缺失或不匹配。CLI 会自动读取 ~/.ark-web/token; 若已改端口/令牌, 用 --port/--token 指定。';
-          }
-          resolve(parsed);
-        });
-      });
-
-      req.on('error', reject);
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Request timeout'));
-      });
-
-      if (body) req.write(JSON.stringify(body));
-      req.end();
+async function api(pathname, opts = {}) {
+  let res;
+  try {
+    res = await fetch(BASE + pathname, {
+      ...opts,
+      headers: { authorization: `Bearer ${token()}`, 'content-type': 'application/json', ...(opts.headers || {}) }
     });
+  } catch (e) {
+    const err = new Error(`连不上桥接 ${BASE}：${e.message}`);
+    err.code = 'E_BRIDGE_DOWN';
+    err.hint = '确认 server/bridge-server.js 在跑（curl ' + BASE + '/health）';
+    throw err;
   }
-
-  get(p) { return this.request(p); }
-  post(p, body) { return this.request(p, { method: 'POST', body }); }
-
-  // ============ 状态 ============
-
-  async getStatus() { return this.get('/status'); }
-  async isConnected() {
-    const s = await this.getStatus();
-    return s.connected;
+  const text = await res.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = { raw: text }; }
+  if (!res.ok) {
+    const err = new Error(body.error ?? text.slice(0, 300));
+    err.code = body.code ?? (res.status === 401 ? 'E_AUTH' : 'E_BACKEND');
+    err.hint = body.hint ?? (res.status === 401 ? '令牌不匹配，检查 ~/.ark-web/token' : undefined);
+    if (typeof body.retryable === 'boolean') err.retryable = body.retryable;
+    if (body.elapsedMs != null) err.elapsedMs = body.elapsedMs;
+    throw err;
   }
-
-  // ============ 批量(一次 HTTP + 一次 WS 往返) ============
-
-  /** steps: [{type, data}...] */
-  async batch(steps) { return this.post('/batch', { steps }); }
-
-  // ============ 标签页 ============
-
-  async getTabs() { return this.get('/tabs'); }
-  async openUrl(url) { return this.post('/open', { url }); }
-  async openCurrent(url) { return this.post('/open', { url, current: true }); }
-  async activateTab(tabId) { return this.post('/tab/activate', { tabId }); }
-  async closeTab(tabId) { return this.post('/tab/close', { tabId }); }
-
-  // ============ 导航 ============
-
-  async reload() { return this.post('/reload', {}); }
-  async goBack() { return this.post('/back', {}); }
-  async goForward() { return this.post('/forward', {}); }
-
-  // ============ 页面信息 / DOM ============
-
-  async getPageInfo() { return this.get('/page-info'); }
-  async getDOM() { return this.get('/dom'); }
-  async getHTML(selector = null) {
-    return selector ? this.post('/html', { selector }) : this.get('/html');
-  }
-  async getFrames() { return this.get('/frames'); }
-  async getLayout() { return this.get('/layout'); }
-  async querySelector(selector) { return this.post('/query', { selector }); }
-  async queryAll(selector, limit = 50, fields = null) {
-    return this.post('/query-all', { selector, limit, ...(fields ? { fields } : {}) });
-  }
-  async queryMany(selectors) { return this.post('/query-many', { selectors }); }
-  async elementExists(selector) { return this.post('/exists', { selector }); }
-  async getText(selector = 'body') { return this.post('/text', { selector }); }
-  async getAttr(selector, name) { return this.post('/attr', { selector, name }); }
-  async getValue(selector) { return this.post('/value', { selector }); }
-
-  // ============ 元素操作 ============
-
-  async click(selector, tabId) {
-    return this.post('/click', tabId != null ? { selector, tabId } : { selector });
-  }
-  async hover(selector) { return this.post('/hover', { selector }); }
-  async doubleClick(selector) { return this.post('/dblclick', { selector }); }
-  async rightClick(selector) { return this.post('/rightclick', { selector }); }
-  async drag(selector, opts = {}) { return this.post('/drag', { selector, ...opts }); }
-  async mouse(type, x, y, opts = {}) { return this.post('/mouse', { type, x, y, ...opts }); }
-  async scrollTo(x = 0, y = 0, behavior = 'smooth') { return this.post('/scroll', { x, y, behavior }); }
-  async scrollIntoView(selector) { return this.post('/scroll-into-view', { selector }); }
-  async scrollBy(x = 0, y = 0) { return this.post('/scroll-by', { x, y }); }
-  async scrollToTop() { return this.scrollTo(0, 0, 'auto'); }
-  async scrollToBottom() { return this.scrollTo(0, 999999, 'auto'); }
-
-  // ============ 键盘 / 输入 ============
-
-  async key(key, modifiers = []) { return this.post('/key', { key, modifiers }); }
-  async type(selector, text, mode = 'fast') {
-    const body = text === undefined ? { text: selector } : { selector, text, mode };
-    return this.post('/type', body);
-  }
-  async fillForm(fields) { return this.post('/fill', { fields }); }
-  async selectOption(selector, opts = {}) { return this.post('/select', { selector, ...opts }); }
-  async check(selector, checked = true) { return this.post('/check', { selector, checked }); }
-  async clearField(selector) { return this.post('/clear', { selector }); }
-  async focus(selector) { return this.post('/focus', { selector }); }
-
-  // 快捷键
-  async pressF12() { return this.key('F12'); }
-  async pressF5() { return this.key('F5'); }
-  async pressEnter() { return this.key('Enter'); }
-  async pressEscape() { return this.key('Escape'); }
-  async pressTab() { return this.key('Tab'); }
-  async pressCtrlShiftI() { return this.key('I', ['ctrl', 'shift']); }
-
-  // ============ JS 执行 / 等待 ============
-
-  async evaluate(code, timeout = 10000) { return this.post('/evaluate', { code, timeout }); }
-  async waitFor(selector, timeout = 10000, state = 'visible') {
-    return this.post('/wait-for', { selector, timeout, state });
-  }
-  async waitForText(text, timeout = 10000, selector = 'body') {
-    return this.post('/wait-for-text', { text, timeout, selector });
-  }
-  async waitForUrl(pattern, timeout = 10000) {
-    return this.post('/wait-for-url', { pattern, timeout });
-  }
-  async waitForLoad(timeout = 15000) {
-    return this.post('/wait-for-load', { timeout });
-  }
-  /** 等页面稳定(DOM 连续 quiet 毫秒无变动) —— 比固定 sleep 可靠, 采集前调用可避免拍到过渡态 */
-  async waitForStable(opts = {}) {
-    return this.post('/wait-for-stable', { timeout: 15000, quiet: 400, ...opts });
-  }
-
-  // ============ 截图 / PDF ============
-
-  async screenshot(format = 'png', quality = 80) {
-    return this.get(`/screenshot?format=${format}&quality=${quality}`);
-  }
-  async screenshotFull(format = 'png', quality = 80) {
-    return this.get(`/screenshot/full?format=${format}&quality=${quality}`);
-  }
-  async screenshotElement(selector) { return this.post('/screenshot/element', { selector }); }
-
-  // ============ 视觉快照 (v7-vision + v8 binary) ============
-  async snapshot(options = {}) {
-    // 支持 GET query 或 POST body；统一用 POST 以支持复杂参数
-    // fast: true 时服务端尝试 probe 缓存 + reduced steps
-    return this.post('/snapshot', options);
-  }
-  async snapshotBinary(options = {}) {
-    // 二进制直出 image/*, 省 base64 30% + JSON 解析
-    const qs = new URLSearchParams();
-    for (const [k,v] of Object.entries(options)) if (v != null) qs.set(k, String(v));
-    qs.set('binary','1');
-    return new Promise((resolve, reject) => {
-      const url = new URL(`/snapshot/binary?${qs.toString()}`, this.baseUrl);
-      if (this.session) url.searchParams.set('session', this.session);
-      if (this.tabId != null && !url.searchParams.has('tabId')) url.searchParams.set('tabId', this.tabId);
-      const req = http.request({ hostname: url.hostname, port: url.port||this.port, path: url.pathname+url.search, method:'GET', agent: keepAliveAgent, headers: this.headers() }, (res)=>{
-        const chunks=[];
-        res.on('data', c=>chunks.push(c));
-        res.on('end', ()=>{
-          const buf = Buffer.concat(chunks);
-          if (res.headers['content-type']?.startsWith('image/')) {
-            const els = (()=>{ try{ return JSON.parse(decodeURIComponent(res.headers['x-snapshot-elements']||'[]')); }catch{ return []; }})();
-            resolve({ success:true, binary:true, buffer: buf, contentType: res.headers['content-type'], url: decodeURIComponent(res.headers['x-snapshot-url']||''), title: decodeURIComponent(res.headers['x-snapshot-title']||''), elements: els, viewport: (()=>{try{return JSON.parse(res.headers['x-snapshot-viewport']||'{}')}catch{return {}}})() });
-          } else {
-            try{ resolve(JSON.parse(buf.toString())); } catch{ resolve({ raw: buf.toString()}); }
-          }
-        });
-      });
-      req.on('error', reject);
-      req.end();
-    });
-  }
-  async snapshotToFile(filePath = 'snapshot.png', options = {}) {
-    const r = await this.snapshot(options);
-    if (!r?.dataUrl) return { error: r?.error || 'Snapshot failed', raw: r };
-    const base64 = r.dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
-    return { success: true, file: filePath, url: r.url, title: r.title, viewport: r.viewport, elements: r.elements, format: r.format, timestamp: r.timestamp };
-  }
-  async snapshotBinaryToFile(filePath = 'snapshot.png', options = {}) {
-    const r = await this.snapshotBinary(options);
-    if (!r?.buffer) return { error: r?.error || 'Binary snapshot failed', raw: r };
-    fs.writeFileSync(filePath, r.buffer);
-    return { success: true, file: filePath, url: r.url, title: r.title, viewport: r.viewport, elements: r.elements, contentType: r.contentType };
-  }
-
-  // ============ 视觉 ref 操作(按 SoM 编号, 无需坐标换算) ============
-  // 用法: const snap = await c.snapshot({annotate:true}); await c.clickRef(snap.elements[3].ref);
-
-  async act(action, data = {}) { return this.post('/act', { action, ...data }); }
-  async clickRef(ref, opts = {}) { return this.post('/act', { action: 'clickRef', ref, ...opts }); }
-  async hoverRef(ref, opts = {}) { return this.post('/act', { action: 'hoverRef', ref, ...opts }); }
-  async fillRef(ref, value, opts = {}) { return this.post('/act', { action: 'fillRef', ref, value, ...opts }); }
-  /** 读取 ref 元素的完整文本/值/属性(小字读不清时比放大截图省 token) */
-  async readText(ref) { return this.post('/act', { action: 'readText', ref }); }
-  /** 按可见文本查找元素(不点击), 返回 ref/坐标/是否可点 */
-  async find(text, opts = {}) { return this.post('/act', { action: 'find', text, ...opts }); }
-  /** 批量 ref 动作: steps = [{op:'click'|'hover'|'fill'|'read', ref, value?}] —— 一次 HTTP 完成多步 */
-  async refs(steps) { return this.post('/act', { action: 'refs', steps }); }
-  /** 可见文本块 + 紧致坐标(免截图读页面) */
-  async textMap(opts = {}) { return this.post('/snapshot/text', opts); }
-  /** 重载插件代码(改完 extension/ 后自我更新); 重载后 CDP 授权失效需重新「启用调试」 */
-  async reloadExtension() { return this.post('/reload-extension', {}); }
-  /** 裁剪放大截图(CDP): ref / selector / x,y,width,height + scale(默认2, 最大5) */
-  async zoom(opts = {}) { return this.post('/snapshot/zoom', opts); }
-  async zoomToFile(filePath = 'zoom.png', opts = {}) {
-    const r = await this.zoom(opts);
-    if (!r?.dataUrl) return { error: r?.error || 'Zoom failed', raw: r };
-    fs.writeFileSync(filePath, Buffer.from(r.dataUrl.replace(/^data:image\/\w+;base64,/, ''), 'base64'));
-    return { success: true, file: filePath, scale: r.scale, clip: r.clip, text: r.text };
-  }
-
-  /** 截图并保存到本地文件, 返回文件路径 */
-  async screenshotToFile(filePath = 'screenshot.png') {
-    const shot = await this.screenshot();
-    if (!shot?.dataUrl) return { error: shot?.error || 'Screenshot failed', shot };
-    const base64 = shot.dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
-    return { success: true, file: filePath };
-  }
-
-  /** 整页截图并保存到本地文件 */
-  async screenshotFullToFile(filePath = 'full-page.png') {
-    const shot = await this.screenshotFull();
-    if (!shot?.dataUrl) return { error: shot?.error || 'Full screenshot failed', shot };
-    const base64 = shot.dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
-    return { success: true, file: filePath };
-  }
-
-  /** 当前页打印为 PDF 并保存 */
-  async pdfToFile(filePath = 'page.pdf', format = 'A4') {
-    const r = await this.get(`/pdf?format=${format}`);
-    if (!r?.success) return r;
-    fs.writeFileSync(filePath, Buffer.from(r.base64, 'base64'));
-    return { success: true, file: filePath, format };
-  }
-
-  /** 文件上传到 input[type=file] (需 CDP) */
-  async upload(selector, files) { return this.post('/upload', { selector, files }); }
-
-  // ============ 高亮 ============
-
-  async highlight(selector, color = '#ff0000', label = null) {
-    return this.post('/highlight', { selector, color, ...(label ? { label } : {}) });
-  }
-  async clearHighlight() { return this.post('/highlight/clear', {}); }
-
-  // ============ Cookie ============
-
-  async getCookies() { return this.get('/cookies'); }
-  async setCookie(cookie) { return this.post('/cookie', cookie); }
-  async removeCookie(name, url) { return this.post('/cookie/remove', { name, ...(url ? { url } : {}) }); }
-
-  // ============ Storage ============
-
-  async getStorage(type = 'local') { return this.get(`/storage?type=${type}`); }
-  async setStorage(key, value, type = 'local') { return this.post('/storage', { key, value, type }); }
-  async removeStorage(key, type = 'local') { return this.post('/storage/remove', { key, type }); }
-  async clearStorage(type = 'local') { return this.post('/storage/clear', { type }); }
-
-  // ============ 网络 ============
-
-  async getNetworkLogs(filter = null, limit = 500, type = null) {
-    const q = [];
-    if (filter) q.push(`filter=${encodeURIComponent(filter)}`);
-    if (limit) q.push(`limit=${limit}`);
-    if (type) q.push(`type=${encodeURIComponent(type)}`);
-    return this.get(`/network${q.length ? '?' + q.join('&') : ''}`);
-  }
-  async clearNetworkLogs() { return this.post('/network/clear', {}); }
-  async getResponseBody(urlPattern) { return this.post('/network/response', { urlPattern }); }
-  async blockUrls(patterns) { return this.post('/network/block', { patterns }); }
-  async unblockUrls() { return this.post('/network/unblock', {}); }
-  async setNetworkConditions(conditions) { return this.post('/network/conditions', conditions); }
-  async resetNetworkConditions() { return this.post('/network/conditions/reset', {}); }
-  async disableCache(disabled = true) { return this.post('/network/disable-cache', { disabled }); }
-  async bypassCsp(enabled = true) { return this.post('/bypass-csp', { enabled }); }
-
-  // 预设网络条件
-  async slow3G() {
-    return this.setNetworkConditions({ offline: false, latency: 400, download: 400 * 1024, upload: 400 * 1024 });
-  }
-  async fast3G() {
-    return this.setNetworkConditions({ offline: false, latency: 150, download: 1.5 * 1024 * 1024, upload: 750 * 1024 });
-  }
-  async offline() {
-    return this.setNetworkConditions({ offline: true, latency: 0, download: 0, upload: 0 });
-  }
-
-  // ============ 性能 ============
-
-  async getPerformance() { return this.get('/performance'); }
-  async getWebVitals() { return this.get('/vitals'); }
-  async getResources() { return this.get('/resources'); }
-  async setCpuThrottling(rate = 4) { return this.post('/cpu', { rate }); }
-
-  // ============ 模拟 ============
-
-  async simulateDevice(device) { return this.post('/device', { device }); }
-  async clearDevice() { return this.post('/device/clear', {}); }
-  async emulateMedia(features) { return this.post('/media', { features }); }
-  async darkMode(enable = true) {
-    return this.emulateMedia(enable ? [{ name: 'prefers-color-scheme', value: 'dark' }] : []);
-  }
-  async reducedMotion(enable = true) {
-    return this.emulateMedia(enable ? [{ name: 'prefers-reduced-motion', value: 'reduce' }] : []);
-  }
-  async setGeolocation(latitude, longitude, accuracy = 10) {
-    return this.post('/geo', { latitude, longitude, accuracy });
-  }
-  async setLocale(locale) { return this.post('/locale', { locale }); }
-  async setTimezone(timezoneId) { return this.post('/timezone', { timezoneId }); }
-  async autoDarkMode(enabled = true) { return this.post('/auto-dark', { enabled }); }
-  async setScriptDisabled(disabled = true) { return this.post('/js', { disabled }); }
-  async setHardwareConcurrency(count) { return this.post('/hardware-concurrency', { count }); }
-
-  // ============ 弹窗 ============
-
-  async dialog(accept = true, promptText = null, auto = undefined) {
-    return this.post('/dialog', { accept, ...(promptText != null ? { promptText } : {}), ...(auto !== undefined ? { auto } : {}) });
-  }
-  async getDialogs() { return this.get('/dialogs'); }
-
-  // ============ 检查 ============
-
-  async securityCheck() { return this.get('/security'); }
-  async a11yCheck() { return this.get('/a11y'); }
-  async seoCheck() { return this.get('/seo'); }
-
-  // ============ 控制台 / DOM 变化 ============
-
-  async getConsoleLogs(limit = 500) { return this.get(`/console?limit=${limit}`); }
-  async clearConsoleLogs() { return this.post('/console/clear', {}); }
-  async getDomChanges() { return this.get('/dom-changes'); }
-  async clearDomChanges() { return this.post('/dom-changes/clear', {}); }
-
-  // ============ 批量 / 监控 / 调试 ============
-
-  async fullAnalysis() { return this.get('/full'); }
-  async analyzeAllTabs() { return this.get('/analyze-all'); }
-  async startMonitor(options = {}) { return this.post('/monitor', options); }
-  async stopMonitor() { return this.post('/monitor/stop', {}); }
-  async getMonitorStatus() { return this.get('/monitor/status'); }
-  async attachDebugger() { return this.post('/debug/attach-all', {}); }
-  async detachDebugger() { return this.post('/debug/detach-all', {}); }
-  async getDebugInfo() { return this.get('/debug/info'); }
-
-  // ============ 审计引擎 ============
-
-  /** 审计当前页或指定 URL。format: json|md|html; save: 写入历史 */
-  async audit(options = {}) { return this.post('/audit', options); }
-
-  /** 审计并保存 HTML 报告到本地 */
-  async auditToHtml(filePath = 'audit-report.html', options = {}) {
-    const r = await this.audit({ ...options, format: 'html' });
-    if (!r.success) return r;
-    fs.writeFileSync(filePath, r.html);
-    return { success: true, file: filePath, scores: r.scores, meta: r.meta };
-  }
-
-  /** 审计并保存 Markdown 报告 */
-  async auditToMarkdown(filePath = 'audit-report.md', options = {}) {
-    const r = await this.audit({ ...options, format: 'md' });
-    if (!r.success) return r;
-    fs.writeFileSync(filePath, r.markdown);
-    return { success: true, file: filePath, scores: r.scores, meta: r.meta };
-  }
-
-  /** 历史趋势 */
-  async auditHistory(url = null, limit = 10) {
-    const q = [];
-    if (url) q.push(`url=${encodeURIComponent(url)}`);
-    q.push(`limit=${limit}`);
-    return this.get(`/history?${q.join('&')}`);
-  }
-
-  /** 批量审计 URL 队列 */
-  async auditRun(urls, budget = null) {
-    return this.post('/audit/run', { urls, ...(budget ? { budget } : {}) });
-  }
-  async auditStatus(taskId) { return this.get(`/audit/status/${encodeURIComponent(taskId)}`); }
-
-  // ============ 报告 ============
-
-  async generateReport(outputPath) {
-    const analysis = await this.fullAnalysis();
-    const report = {
-      metadata: {
-        timestamp: new Date().toISOString(),
-        url: analysis.pageInfo?.url,
-        title: analysis.pageInfo?.title
-      },
-      performance: {
-        webVitals: analysis.vitals,
-        navigation: analysis.performance?.navigation,
-        resources: analysis.performance?.resources,
-        memory: analysis.performance?.memory
-      },
-      security: analysis.security,
-      accessibility: analysis.a11y,
-      seo: analysis.seo,
-      summary: {
-        domElements: analysis.dom?.elements,
-        loadTime: analysis.performance?.navigation?.loadComplete,
-        securityIssues: (Array.isArray(analysis.security) ? analysis.security.filter(s => !s.pass).length : 0),
-        a11yIssues: (Array.isArray(analysis.a11y) ? analysis.a11y.length : 0),
-        seoScore: (Array.isArray(analysis.seo) ? analysis.seo.filter(s => s.pass).length : 0)
-      }
-    };
-    if (outputPath) fs.writeFileSync(outputPath, JSON.stringify(report, null, 2));
-    return report;
-  }
+  return body;
 }
 
-// ============ 命令行 ============
+// 最近一次桥接往返耗时（含扩展执行），随 envelope 回给调用方
+let lastElapsedMs = null;
 
-if (require.main === module) {
-  // 全局参数: --session <id> 会话隔离; --body-file <path> 从 UTF-8 JSON 文件读取 POST body(中文安全通道,
-  // 解决 PowerShell 5.1 命令行内嵌中文被 GBK 控制台损坏的问题)
-  let sessionOpt = null;
-  let bodyFile = null;
-  let portOpt = null;
-  let hostOpt = null;
-  let tokenOpt = null;
-  let tabIdOpt = null;
-  const args = [];
-  for (let i = 0; i < process.argv.slice(2).length; i++) {
-    const a = process.argv.slice(2)[i];
-    if (a === '--session' || a === '--session=') { sessionOpt = process.argv.slice(2)[++i]; continue; }
-    if (a.startsWith('--session=')) { sessionOpt = a.slice('--session='.length); continue; }
-    if (a === '--body-file' || a === '--body-file=') { bodyFile = process.argv.slice(2)[++i]; continue; }
-    if (a.startsWith('--body-file=')) { bodyFile = a.slice('--body-file='.length); continue; }
-    // 连接参数: 端口/主机/令牌(也可用 ARK_PORT / ARK_HOST / ARK_TOKEN 环境变量)
-    if (a === '--port') { portOpt = process.argv.slice(2)[++i]; continue; }
-    if (a.startsWith('--port=')) { portOpt = a.slice('--port='.length); continue; }
-    if (a === '--host') { hostOpt = process.argv.slice(2)[++i]; continue; }
-    if (a.startsWith('--host=')) { hostOpt = a.slice('--host='.length); continue; }
-    if (a === '--token') { tokenOpt = process.argv.slice(2)[++i]; continue; }
-    if (a.startsWith('--token=')) { tokenOpt = a.slice('--token='.length); continue; }
-    // 目标标签页: 所有请求自动带 ?tabId=(多标签页/多窗口下确定性定位)
-    if (a === '--tabId') { tabIdOpt = process.argv.slice(2)[++i]; continue; }
-    if (a.startsWith('--tabId=')) { tabIdOpt = a.slice('--tabId='.length); continue; }
-    args.push(a);
+async function cmd(name, args = {}, timeoutMs = 30000, extOverride = null) {
+  const t0 = Date.now();
+  const sel = extOverride || global.__ARK_EXT_SEL__ || (global.__ARK_EXT__ ? { extId: global.__ARK_EXT__ } : null);
+  const extId = typeof sel === 'string' ? sel : sel && sel.extId;
+  const conn = sel && typeof sel === 'object' ? sel.conn : null;
+  const r = await api('/cmd', {
+    method: 'POST',
+    body: JSON.stringify({
+      cmd: name, args, timeoutMs,
+      ...(extId ? { extId } : {}),
+      ...(conn ? { conn } : {})
+    })
+  });
+  lastElapsedMs = r.elapsedMs != null ? r.elapsedMs : Date.now() - t0;
+  if (r.extId) global.__ARK_LAST_EXT__ = { extId: r.extId, browser: r.browser, conn: r.conn };
+  return r.data;
+}
+
+async function listExtensions() {
+  const st = await api('/status');
+  return st.extensions || [];
+}
+
+/** --ext / --browser 的统一解析：all、逗号列表、extId、浏览器名都支持 */
+async function resolveExts(spec) {
+  const list = await listExtensions();
+  if (!spec || spec === 'all' || spec === true) {
+    if (!list.length) fail('E_EXT_DOWN', '没有已连接扩展', '启动 bridge-server 并在 chrome://extensions 加载扩展');
+    return list;
   }
-  const client = new BrowserClient({ session: sessionOpt || undefined, host: hostOpt || undefined, port: portOpt || undefined, token: tokenOpt || undefined, tabId: tabIdOpt || undefined });
-    // body-file 覆盖: 除 /batch(chain) 外的所有 POST 请求 body 使用文件内容(UTF-8)
-    // chain 场景: 文件内容含 steps 数组时直接用文件步骤(JSON 可完整表达嵌套, 绕开命令行转义)
-    let bodyOverride = null;
-    let chainFileSteps = null;
-    if (bodyFile) {
-      try {
-        bodyOverride = JSON.parse(fs.readFileSync(bodyFile, 'utf8'));
-        if (!bodyOverride || typeof bodyOverride !== 'object' || Array.isArray(bodyOverride)) {
-          throw new Error('--body-file 必须指向 JSON 对象');
-        }
-        if (Array.isArray(bodyOverride.steps)) chainFileSteps = bodyOverride.steps;
-      } catch (e) {
-        console.error(JSON.stringify({ error: `--body-file 读取失败: ${e.message}` }, null, 2));
-        process.exit(1);
-      }
-      const origPost = client.post.bind(client);
-      client.post = (p, body) => origPost(p, (p === '/batch' || p.startsWith('/session')) ? body : bodyOverride);
-      console.error(`[ark] --body-file 生效: POST 请求 body 来自 ${bodyFile}(/batch、/session* 除外)`);
-    }
-  const cmd = args[0];
-
-  function parseJsonOrRaw(str, fallback) {
-    try { return JSON.parse(str); } catch { return fallback; }
+  const wanted = String(spec).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const picked = [];
+  for (const w of wanted) {
+    const hits = list.filter((e) =>
+      String(e.id || '').toLowerCase() === w ||
+      String(e.browser || '').toLowerCase() === w ||
+      String(e.name || '').toLowerCase().includes(w)
+    );
+    if (!hits.length) fail('E_EXT_NOT_FOUND', `没有匹配的扩展/浏览器：${w}`, `可用：${list.map((e) => `${e.browser}:${e.id}`).join(', ') || '(无)'}`);
+    for (const hit of hits) if (!picked.some((x) => x.conn === hit.conn)) picked.push(hit);
   }
+  return picked;
+}
 
-  async function run() {
+/** 多浏览器时按 tabId 反查所属浏览器；唯一命中才自动绑定 */
+async function resolveExtForTab(tabId) {
+  const list = await listExtensions();
+  if (list.length <= 1) return null;
+  const matches = [];
+  for (const e of list) {
     try {
-      let result;
-      switch (cmd) {
-        // 基础
-        case 'status': result = await client.getStatus(); break;
-        case 'tabs': result = await client.getTabs(); break;
-        case 'full': result = await client.fullAnalysis(); break;
-
-        // 会话(多 agent 并行隔离)
-        case 'session': result = await client.get('/session'); break;
-        case 'session-create': result = await client.post('/session/create', {}); break;
-        case 'session-delete': result = await client.post('/session/delete', { sessionId: args[1], ...(args[2] === 'close' || args[2] === '--close' ? { closeTabs: true } : {}) }); break;
-        case 'session-assign': result = await client.post('/session/assign', { sessionId: args[1], tabId: parseInt(args[2]) }); break;
-        case 'session-release': result = await client.post('/session/release', { sessionId: args[1], ...(args[2] ? { tabId: parseInt(args[2]) } : {}) }); break;
-        case 'session-tab': result = await client.post('/session/tab', { sessionId: args[1], url: args[2] }); break;
-
-        // 链式
-        case 'chain': {
-          // node browser-client.js chain "open https://x" "wait-load" "page-info"
-          // 或: node browser-client.js chain open https://x --- wait-load --- page-info
-          // 或: node browser-client.js chain --body-file steps.json (文件含 {"steps":[...]}, 完整 JSON 免转义)
-          if (chainFileSteps) {
-            const t0 = Date.now();
-            const r = await client.batch(chainFileSteps);
-            result = { success: true, fileSteps: true, steps: r.steps || [], total: Date.now() - t0 };
-            break;
-          }
-          const raw = args.slice(1).join(' ');
-          const parts = raw.includes('---')
-            ? raw.split('---').map(s => s.trim()).filter(Boolean)
-            : args.slice(1).map(a => a.trim()).filter(Boolean);
-          const steps = [];
-          for (const p of parts) {
-            const toks = p.split(/\s+/);
-            const t = toks[0];
-            const rest = toks.slice(1);
-            steps.push({ type: t, data: { _raw: rest } });
-          }
-          // 简单映射: 纯命令步骤不携带参数映射, 交给 batch 前规范化
-          result = await runChainSteps(steps);
-          break;
-        }
-
-        // 导航
-        case 'open': result = await client.openUrl(args[1]); break;
-        case 'open-current': result = await client.openCurrent(args[1]); break;
-        case 'reload': result = await client.reload(); break;
-        case 'back': result = await client.goBack(); break;
-        case 'forward': result = await client.goForward(); break;
-        case 'tab': result = await client.activateTab(parseInt(args[1])); break;
-        case 'close-tab': result = await client.closeTab(parseInt(args[1])); break;
-
-        // 页面信息 / DOM
-        case 'page-info': result = await client.getPageInfo(); break;
-        case 'dom': result = await client.getDOM(); break;
-        case 'html': result = await client.getHTML(args[1] || null); break;
-        case 'frames': result = await client.getFrames(); break;
-        case 'layout': result = await client.getLayout(); break;
-        case 'query': result = await client.querySelector(args[1]); break;
-        case 'query-all': result = await client.queryAll(args[1], parseInt(args[2]) || 50); break;
-        case 'query-many': result = await client.queryMany(parseJsonOrRaw(args[1], [args[1]])); break;
-        case 'exists': result = await client.elementExists(args[1]); break;
-        case 'text': result = await client.getText(args[1] || 'body'); break;
-        case 'attr': result = await client.getAttr(args[1], args[2]); break;
-        case 'value': result = await client.getValue(args[1]); break;
-
-        // 元素操作
-        case 'click': result = await client.click(args[1]); break;
-        case 'hover': result = await client.hover(args[1]); break;
-        case 'dblclick': result = await client.doubleClick(args[1]); break;
-        case 'rightclick': result = await client.rightClick(args[1]); break;
-        case 'drag': {
-          const opts = parseJsonOrRaw(args.slice(2).join(' '), { targetSelector: args[2] });
-          result = await client.drag(args[1], typeof opts === 'object' ? opts : {});
-          break;
-        }
-        case 'mouse': result = await client.mouse(args[1], parseInt(args[2]) || 0, parseInt(args[3]) || 0); break;
-        case 'scroll': result = await client.scrollTo(parseInt(args[1]) || 0, parseInt(args[2]) || 0); break;
-        case 'scroll-top': result = await client.scrollToTop(); break;
-        case 'scroll-bottom': result = await client.scrollToBottom(); break;
-        case 'scroll-into-view': result = await client.scrollIntoView(args[1]); break;
-        case 'scroll-by': result = await client.scrollBy(parseInt(args[1]) || 0, parseInt(args[2]) || 0); break;
-        case 'select': {
-          const v = args.slice(2).join(' ');
-          result = await client.selectOption(args[1], parseJsonOrRaw(v, { value: v }));
-          break;
-        }
-        case 'check': result = await client.check(args[1], args[2] !== 'off' && args[2] !== 'false' && args[2] !== '0'); break;
-        case 'clear-field': result = await client.clearField(args[1]); break;
-        case 'focus': result = await client.focus(args[1]); break;
-
-        // 键盘 / 输入
-        case 'key': result = await client.key(args[1], args.slice(2)); break;
-        case 'type': {
-          if (args.length >= 3) result = await client.type(args[1], args.slice(2).join(' '));
-          else result = await client.type(args[1]);
-          break;
-        }
-        case 'fill': {
-          const fields = parseJsonOrRaw(args[1], [{ selector: args[1], value: args.slice(2).join(' ') }]);
-          result = await client.fillForm(Array.isArray(fields) ? fields : [fields]);
-          break;
-        }
-        case 'f12': result = await client.pressF12(); break;
-        case 'f5': result = await client.pressF5(); break;
-        case 'enter': result = await client.pressEnter(); break;
-        case 'escape': result = await client.pressEscape(); break;
-
-        // JS / 等待
-        case 'evaluate': result = await client.evaluate(args.slice(1).join(' ')); break;
-        case 'wait-for': result = await client.waitFor(args[1], parseInt(args[2]) || 10000); break;
-        case 'wait-for-text': result = await client.waitForText(args[1], parseInt(args[2]) || 10000, args[3]); break;
-        case 'wait-for-url': result = await client.waitForUrl(args[1], parseInt(args[2]) || 10000); break;
-        case 'wait-load': result = await client.waitForLoad(); break;
-        case 'wait-stable': result = await client.waitForStable({ timeout: +(args[1] || 15000) }); break;
-
-        // 截图 / PDF / 视觉快照(v7-vision)
-        case 'screenshot': result = await client.screenshotToFile(args[1] || 'screenshot.png'); break;
-        case 'screenshot-full': result = await client.screenshotFullToFile(args[1] || 'full-page.png'); break;
-        case 'screenshot-element': result = await client.screenshotElement(args[1]); break;
-        case 'snapshot': {
-          // 用法: snapshot [file.png] [--annotate] [--full] [--format png] [--quality 80] [--selector "..."] [--max 50]
-          // 位置参数 1 若含 .png/.jpg 则视为文件路径，其余为选项
-          let file = null;
-          const opts = {};
-          for (let i = 1; i < args.length; i++) {
-            const a = args[i];
-            if (!file && /\.(png|webp|jpe?g)$/i.test(a)) { file = a; continue; }
-            if (a === '--annotate' || a === '--annotate=true' || a === '-a') opts.annotate = true;
-            else if (a === '--full' || a === '--full=true') opts.full = true;
-            else if (a.startsWith('--format=')) opts.format = a.split('=')[1];
-            else if (a === '--format' && args[i+1]) opts.format = args[++i];
-            else if (a.startsWith('--quality=')) opts.quality = +a.split('=')[1];
-            else if (a === '--quality' && args[i+1]) opts.quality = +args[++i];
-            else if (a.startsWith('--selector=')) opts.selector = a.slice('--selector='.length);
-            else if (a === '--selector' && args[i+1]) opts.selector = args[++i];
-            else if (a.startsWith('--max=')) opts.maxElements = +a.split('=')[1];
-            else if (a === '--max' && args[i+1]) opts.maxElements = +args[++i];
-            else if (a === '--compact' || a.startsWith('--compact=')) opts.compact = true;
-            else if (a === '--webp') opts.format = 'webp';
-          }
-          // body-file 覆盖已在入口处理(POST /snapshot 的 body 来自文件)
-          if (file) result = await client.snapshotToFile(file, opts);
-          else {
-            // 无文件则直接返回 JSON（含 dataUrl，适合多模态模型直接看）
-            if (Object.keys(opts).length) result = await client.snapshot(opts);
-            else result = await client.snapshot({});
-          }
-          break;
-        }
-        // 视觉 ref 操作: 直接按 SoM 编号操作, 无需坐标
-        case 'click-ref': result = await client.clickRef(+args[1], { fast: true }); break;
-        case 'hover-ref': result = await client.hoverRef(+args[1]); break;
-        case 'fill-ref': result = await client.fillRef(+args[1], args.slice(2).join(' ')); break;
-        case 'read-text': result = await client.readText(+args[1]); break;
-        case 'act': {
-          // 通用高层动作: act '{"action":"clickRef","ref":3,"waitFor":"load"}'
-          const body = parseJsonOrRaw(args.slice(1).join(' '), null);
-          if (!body || typeof body !== 'object' || !body.action) {
-            result = { error: '用法: act \'{"action":"clickRef","ref":3}\'', actions: ['snapshot', 'clickRef', 'hoverRef', 'fillRef', 'readText', 'zoom', 'find', 'refs', 'click', 'clickText', 'fill', 'type', 'extract', 'navigate', 'evaluate'] };
-            break;
-          }
-          const { action, ...rest } = body;
-          result = await client.act(action, rest);
-          break;
-        }
-        case 'find': result = await client.find(args.slice(1).join(' ')); break;
-        case 'text-map': result = await client.textMap(parseJsonOrRaw(args[1], {})); break;
-        case 'refs': result = await client.refs(parseJsonOrRaw(args.slice(1).join(' '), [])); break;
-      case 'set-key': {
-        // 面板自检里的提示指向本命令：写入模型密钥到 ~/.ark-web/deepseek.key（立即生效）。
-        // 参数取法与其它子命令一致（args 数组，不是 process.argv）
-        const key = args[1];
-        if (!key) { console.error('用法: node client/browser-client.js set-key <你的密钥>'); process.exit(1); }
-        const out = await client.request('/settings/api-key', { method: 'POST', body: { key } });
-        console.log(out && out.ok ? ('已写入密钥: ' + (out.keyHint || '') + ' → ' + (out.file || '')) : ('写入失败: ' + JSON.stringify(out)));
-        return out;
-      }
-        case 'reload-extension': result = await client.reloadExtension(); break;
-        case 'zoom': {
-          // 用法: zoom [ref|selector] [out.png|out.webp] [--scale=3] [--format=webp]
-          const opts = {};
-          const file = args.find(a => /\.(png|webp|jpe?g)$/i.test(a)) || null;
-          for (let i = 1; i < args.length; i++) {
-            const a = args[i];
-            if (/\.(png|webp|jpe?g)$/i.test(a)) continue;
-            if (a.startsWith('--scale=')) opts.scale = +a.split('=')[1];
-            else if (a === '--scale' && args[i + 1]) opts.scale = +args[++i];
-            else if (a.startsWith('--format=')) opts.format = a.split('=')[1];
-            else if (a === '--format' && args[i + 1]) opts.format = args[++i];
-            else if (/^\d+$/.test(a)) opts.ref = +a;
-            else if (!opts.selector) opts.selector = a;
-          }
-          result = file ? await client.zoomToFile(file, opts) : await client.zoom(opts);
-          break;
-        }
-        case 'pdf': result = await client.pdfToFile(args[1] || 'page.pdf', args[2] || 'A4'); break;
-        case 'upload': result = await client.upload(args[1], parseJsonOrRaw(args[2], [args[2]])); break;
-
-        // 高亮
-        case 'highlight': result = await client.highlight(args[1], args[2] || '#ff0000', args[3] || null); break;
-        case 'highlight-clear': result = await client.clearHighlight(); break;
-
-        // Cookie / Storage
-        case 'cookies': result = await client.getCookies(); break;
-        case 'cookie-set': {
-          const c = parseJsonOrRaw(args.slice(1).join(' '), { name: args[1], value: args[2] });
-          result = await client.setCookie(typeof c === 'object' ? c : { name: args[1], value: args[2] });
-          break;
-        }
-        case 'cookie-remove': result = await client.removeCookie(args[1], args[2] || undefined); break;
-        case 'storage': result = await client.getStorage(args[1] || 'local'); break;
-        case 'storage-set': result = await client.setStorage(args[1], args[2], args[3] || 'local'); break;
-        case 'storage-remove': result = await client.removeStorage(args[1], args[2] || 'local'); break;
-        case 'storage-clear': result = await client.clearStorage(args[1] || 'local'); break;
-
-        // 网络
-        case 'network': result = await client.getNetworkLogs(args[1] || null); break;
-        case 'network-clear': result = await client.clearNetworkLogs(); break;
-        case 'network-conditions': {
-          const c = parseJsonOrRaw(args.slice(1).join(' '), { offline: args[1] === 'offline' });
-          result = await client.setNetworkConditions(typeof c === 'object' ? c : {});
-          break;
-        }
-        case 'network-reset': result = await client.resetNetworkConditions(); break;
-        case 'block': {
-          const b = parseJsonOrRaw(args.slice(1).join(' '), [args[1]]);
-          result = await client.blockUrls(Array.isArray(b) ? b : [b]);
-          break;
-        }
-        case 'unblock': result = await client.unblockUrls(); break;
-        case 'response-body': result = await client.getResponseBody(args[1]); break;
-
-        // 性能 / 检查
-        case 'performance': result = await client.getPerformance(); break;
-        case 'vitals': result = await client.getWebVitals(); break;
-        case 'resources': result = await client.getResources(); break;
-        case 'cpu': result = await client.setCpuThrottling(parseInt(args[1]) || 4); break;
-        case 'a11y': result = await client.a11yCheck(); break;
-        case 'seo': result = await client.seoCheck(); break;
-        case 'security': result = await client.securityCheck(); break;
-        case 'console': result = await client.getConsoleLogs(parseInt(args[1]) || 500); break;
-        case 'console-clear': result = await client.clearConsoleLogs(); break;
-        case 'dom-changes': result = await client.getDomChanges(); break;
-        case 'dom-changes-clear': result = await client.clearDomChanges(); break;
-
-        // 模拟
-        case 'device': result = await client.simulateDevice(args.slice(1).join(' ')); break;
-        case 'device-clear': result = await client.clearDevice(); break;
-        case 'cleanup': result = await client.post('/reset-all', {}); break;
-        case 'media': {
-          const m = parseJsonOrRaw(args.slice(1).join(' '), [{ name: 'prefers-color-scheme', value: args[1] || 'dark' }]);
-          result = await client.emulateMedia(Array.isArray(m) ? m : [m]);
-          break;
-        }
-        case 'dark': result = await client.darkMode(); break;
-        case 'dark-off': result = await client.darkMode(false); break;
-        case 'auto-dark': result = await client.autoDarkMode(args[1] !== 'off'); break;
-        case 'geo': result = await client.setGeolocation(parseFloat(args[1]), parseFloat(args[2]), args[3] ? parseFloat(args[3]) : 10); break;
-        case 'locale': result = await client.setLocale(args[1]); break;
-        case 'timezone': result = await client.setTimezone(args[1]); break;
-        case 'js': result = await client.setScriptDisabled(args[1] !== 'off'); break;
-        case 'cpu-count': result = await client.setHardwareConcurrency(parseInt(args[1])); break;
-        case 'cache-off': result = await client.disableCache(args[1] !== 'off'); break;
-        case 'csp': result = await client.bypassCsp(args[1] !== 'off'); break;
-
-        // 弹窗
-        case 'dialog':
-          if (args[1] === 'auto') {
-            const on = args[2] !== 'off' && args[2] !== 'false';
-            result = await client.dialog(true, null, on);
-          } else {
-            result = await client.dialog(args[1] !== 'dismiss', args[2] || null);
-          }
-          break;
-        case 'dialogs': result = await client.getDialogs(); break;
-
-        // 批量 / 监控 / 调试
-        case 'analyze-all': result = await client.analyzeAllTabs(); break;
-        case 'monitor':
-          result = await client.startMonitor({ interval: parseInt(args[1]) || 5000, duration: parseInt(args[2]) || 60000 });
-          break;
-        case 'monitor-stop': result = await client.stopMonitor(); break;
-        case 'monitor-status': result = await client.getMonitorStatus(); break;
-        case 'debug-on': result = await client.attachDebugger(); break;
-        case 'debug-off': result = await client.detachDebugger(); break;
-        case 'debug-info': result = await client.getDebugInfo(); break;
-        case 'cdp-status': result = await client.get('/debug/cdp-status'); break;
-        case 'report': result = await client.generateReport(args[1] || 'browser-report.json'); break;
-
-        // 审计
-        case 'audit':
-          result = await client.audit({ url: args[1] || undefined });
-          break;
-        case 'audit-html':
-          result = await client.auditToHtml(args[1] || 'audit-report.html', { url: args[2] || undefined });
-          break;
-        case 'audit-md':
-          result = await client.auditToMarkdown(args[1] || 'audit-report.md', { url: args[2] || undefined });
-          break;
-        case 'history':
-          result = await client.auditHistory(args[1] || null);
-          break;
-        case 'audit-run': {
-          const urls = parseJsonOrRaw(args[1], [args[1]]);
-          result = await client.auditRun(Array.isArray(urls) ? urls : [urls]);
-          break;
-        }
-        case 'audit-status':
-          result = await client.auditStatus(args[1]);
-          break;
-
-        default:
-          return printHelp();
-      }
-      console.log(JSON.stringify(result, null, 2));
-    } catch (e) {
-      console.error(JSON.stringify({ error: e.message }, null, 2));
-      process.exit(1);
-    }
+      const tabs = await cmd('tabs', {}, 30000, { extId: e.id, conn: e.conn });
+      if (Array.isArray(tabs) && tabs.some((t) => Number(t.id) === Number(tabId))) matches.push(e);
+    } catch { /* 单个浏览器查询失败不影响其它 */ }
   }
-
-  /** 链式步骤规范化: 将 CLI 名称映射为插件命令类型, 并组装 data */
-  async function runChainSteps(steps) {
-    // CLI 名称 → 插件命令类型 (batch 直接分发到插件 dispatch)
-    const TYPE_MAP = {
-      'open': 'open-url', 'goto': 'open-url',
-      'open-current': 'open-url', 'navigate': 'open-url',
-      'page-info': 'get-page-info', 'dom': 'get-dom', 'html': 'get-html',
-      'frames': 'get-frames', 'layout': 'get-layout',
-      'query': 'query-selector', 'query-all': 'query-all', 'query-many': 'query-many',
-      'exists': 'element-exists', 'text': 'get-text', 'attr': 'get-attr', 'value': 'get-value',
-      'click': 'click-element', 'hover': 'hover-element', 'dblclick': 'double-click',
-      'rightclick': 'right-click', 'drag': 'drag-element', 'mouse': 'mouse',
-      'scroll': 'scroll-page', 'scroll-into-view': 'scroll-into-view',
-      'scroll-by': 'scroll-by', 'scroll-top': 'scroll-page', 'scroll-bottom': 'scroll-page',
-      'key': 'simulate-key', 'type': 'type-text', 'fill': 'fill-form',
-      'select': 'select-option', 'check': 'check-box', 'clear': 'clear-field', 'focus': 'focus-element',
-      'f12': 'simulate-key', 'f5': 'simulate-key', 'enter': 'simulate-key', 'escape': 'simulate-key',
-      'evaluate': 'evaluate', 'wait-for': 'wait-for-selector',
-      'wait-for-text': 'wait-for-text', 'wait-for-url': 'wait-for-url', 'wait-load': 'wait-for-load',
-      'wait-stable': 'wait-for-stable',
-      'snapshot': 'vision-snapshot', 'snapshot-annotate': 'vision-snapshot',
-      'click-ref': 'click-ref', 'hover-ref': 'hover-ref', 'fill-ref': 'fill-ref',
-      'read-text': 'read-text', 'zoom': 'zoom-shot',
-      'text-map': 'text-map', 'find': 'find-text', 'reload-extension': 'reload-extension',
-      'screenshot': 'screenshot', 'screenshot-full': 'screenshot-full',
-      'screenshot-element': 'screenshot-element', 'pdf': 'print-to-pdf',
-      'highlight': 'highlight-elements', 'highlight-clear': 'clear-highlights',
-      'dialog': 'dialog', 'dialogs': 'get-dialogs',
-      'cookies': 'get-cookies', 'cookie': 'set-cookie', 'cookie-remove': 'remove-cookie',
-      'storage': 'get-storage', 'storage-set': 'set-storage',
-      'storage-remove': 'remove-storage', 'storage-clear': 'clear-storage',
-      'network': 'get-network-logs', 'block': 'block-urls', 'unblock': 'unblock-urls',
-      'network-conditions': 'set-network-conditions', 'network-reset': 'reset-network-conditions',
-      'cache-off': 'set-cache-disabled', 'csp': 'bypass-csp', 'response-body': 'get-response-body',
-      'performance': 'get-performance', 'vitals': 'get-web-vitals', 'resources': 'get-resources',
-      'cpu': 'set-cpu-throttling',
-      'device': 'simulate-device', 'device-clear': 'clear-device', 'media': 'emulate-media',
-      'geo': 'set-geolocation', 'locale': 'set-locale', 'timezone': 'set-timezone',
-      'auto-dark': 'auto-dark-mode', 'js': 'set-script-disabled',
-      'cleanup': 'reset-all-simulations',
-      'cpu-count': 'set-hardware-concurrency',
-      'security': 'security-check', 'a11y': 'a11y-check', 'seo': 'seo-check',
-      'console': 'get-console-logs', 'console-clear': 'clear-console-logs',
-      'dom-changes': 'get-dom-changes', 'dom-changes-clear': 'clear-dom-changes',
-      'tabs': 'get-tabs', 'status': 'get-status', 'ping': 'ping',
-      'reload': 'reload', 'back': 'back', 'forward': 'forward',
-      'tab': 'activate-tab', 'close-tab': 'close-tab', 'upload': 'upload-file',
-      'clear-cache': 'clear-cache'
-    };
-    // 客户端本地执行的步骤类型(不经 /batch, 直接调 HTTP 聚合端点)
-    const CLIENT_STEPS = new Set(['full', 'analyze-all', 'monitor', 'monitor-stop', 'monitor-status', 'report', 'act', 'fast', 'refs']);
-
-    const norm = steps.map(({ type, data }) => {
-      const raw = data?._raw || [];
-      const d = {};
-      const pluginType = TYPE_MAP[type] || type;
-      switch (type) {
-        case 'open': case 'goto': d.url = raw[0]; break;
-        case 'open-current': case 'navigate': d.url = raw[0]; d.current = true; break;
-        case 'click': case 'hover': case 'dblclick': case 'rightclick':
-        case 'query': case 'exists': case 'value': case 'clear': case 'focus':
-        case 'scroll-into-view': case 'screenshot-element': case 'highlight':
-          d.selector = raw[0]; break;
-        case 'drag': {
-          d.selector = raw[0];
-          const opts = parseJsonOrRaw(raw.slice(1).join(' '), {});
-          if (typeof opts === 'object') Object.assign(d, opts);
-          else if (raw[1]) d.targetSelector = raw[1];
-          break;
-        }
-        case 'mouse': d.type = raw[0] || 'click'; d.x = +(raw[1] || 0); d.y = +(raw[2] || 0); break;
-        case 'attr': d.selector = raw[0]; d.name = raw[1]; break;
-        case 'type': {
-          if (raw.length >= 2) { d.selector = raw[0]; d.text = raw.slice(1).join(' '); }
-          else d.text = raw[0];
-          break;
-        }
-        case 'key': d.key = raw[0]; d.modifiers = raw.slice(1); break;
-        case 'f12': d.key = 'F12'; d.modifiers = []; break;
-        case 'f5': d.key = 'F5'; d.modifiers = []; break;
-        case 'enter': d.key = 'Enter'; d.modifiers = []; break;
-        case 'escape': d.key = 'Escape'; d.modifiers = []; break;
-        case 'fill': {
-          d.fields = parseJsonOrRaw(raw[0], [{ selector: raw[0], value: raw.slice(1).join(' ') }]);
-          if (!Array.isArray(d.fields)) d.fields = [d.fields];
-          break;
-        }
-        case 'select': d.selector = raw[0]; {
-          const v = raw.slice(1).join(' ');
-          const parsed = parseJsonOrRaw(v, { value: v });
-          if (typeof parsed === 'object') Object.assign(d, parsed);
-          break;
-        }
-        case 'check': d.selector = raw[0]; d.checked = raw[1] !== 'off' && raw[1] !== 'false' && raw[1] !== '0'; break;
-        case 'click-ref': case 'hover-ref': d.ref = parseInt(raw[0], 10); d.fast = true; break;
-        case 'fill-ref': d.ref = parseInt(raw[0], 10); d.value = raw.slice(1).join(' '); break;
-        case 'read-text': d.ref = parseInt(raw[0], 10); break;
-        case 'find': d.text = raw.join(' '); break;
-        case 'refs': d.steps = parseJsonOrRaw(raw.join(' '), []); if (!Array.isArray(d.steps)) d.steps = []; break;
-        case 'zoom': {
-          d.scale = 3;
-          for (let i = 0; i < raw.length; i++) {
-            const a = raw[i];
-            if (/^\d+$/.test(a)) d.ref = parseInt(a, 10);
-            else if (a.startsWith('--scale=')) d.scale = +a.slice(8);
-            else if (a.startsWith('--format=')) d.format = a.slice(9);
-            else if (!a.startsWith('--') && !/\.(png|webp|jpe?g)$/i.test(a)) d.selector = a;
-          }
-          break;
-        }
-        case 'scroll': d.x = +(raw[0] || 0); d.y = +(raw[1] || 0); break;
-        case 'scroll-top': d.x = 0; d.y = 0; break;
-        case 'scroll-bottom': d.x = 0; d.y = 999999; break;
-        case 'scroll-by': d.x = +(raw[0] || 0); d.y = +(raw[1] || 0); break;
-        case 'evaluate': d.code = raw.join(' '); break;
-        case 'wait-for': d.selector = raw[0]; d.timeout = +(raw[1] || 10000); break;
-        case 'wait-for-text': d.text = raw[0]; d.timeout = +(raw[1] || 10000); if (raw[2]) d.selector = raw[2]; break;
-        case 'wait-for-url': d.pattern = raw[0]; d.timeout = +(raw[1] || 10000); break;
-        case 'wait-stable': d.timeout = +(raw[0] || 15000); if (raw[1]) d.quiet = +raw[1]; break;
-        case 'text': d.selector = raw[0] || 'body'; break;
-        case 'html': if (raw[0]) d.selector = raw[0]; break;
-        case 'highlight': d.color = raw[1] || '#ff0000'; if (raw[2]) d.label = raw[2]; break;
-        case 'device': d.device = raw.join(' '); break;
-        case 'media': d.features = parseJsonOrRaw(raw[0], [{ name: 'prefers-color-scheme', value: raw[0] || 'dark' }]); break;
-        case 'geo': d.latitude = parseFloat(raw[0]); d.longitude = parseFloat(raw[1]); if (raw[2]) d.accuracy = parseFloat(raw[2]); break;
-        case 'timezone': d.timezoneId = raw[0]; break;
-        case 'locale': d.locale = raw[0]; break;
-        case 'auto-dark': d.enabled = raw[0] !== 'off'; break;
-        case 'js': d.disabled = raw[0] !== 'off'; break;
-        case 'cache-off': d.disabled = raw[0] !== 'off'; break;
-        case 'csp': d.enabled = raw[0] !== 'off'; break;
-        case 'cpu': d.rate = +(raw[0] || 4); break;
-        case 'cpu-count': d.count = +(raw[0] || 4); break;
-        case 'network-conditions': d = parseJsonOrRaw(raw.join(' '), { offline: raw[0] === 'offline' }); break;
-        case 'block': d.patterns = parseJsonOrRaw(raw.join(' '), [raw[0]]); if (!Array.isArray(d.patterns)) d.patterns = [d.patterns]; break;
-        case 'response-body': d.urlPattern = raw[0]; break;
-        case 'cookie': d = parseJsonOrRaw(raw.join(' '), { name: raw[0], value: raw[1] }); break;
-        case 'cookie-remove': d.name = raw[0]; if (raw[1]) d.url = raw[1]; break;
-        case 'storage-set': d.key = raw[0]; d.value = raw[1]; d.type = raw[2] || 'local'; break;
-        case 'storage-remove': d.key = raw[0]; d.type = raw[1] || 'local'; break;
-        case 'storage-clear': d.type = raw[0] || 'local'; break;
-        case 'storage': d.type = raw[0] || 'local'; break;
-        case 'dialog': {
-          if (raw[0] === 'auto') { d.auto = raw[1] !== 'off' && raw[1] !== 'false' && raw[1] !== '0'; if (raw[2]) d.promptText = raw[2]; }
-          else { d.accept = raw[0] !== 'dismiss'; if (raw[1]) d.promptText = raw[1]; }
-          break;
-        }
-        case 'tab': d.tabId = +raw[0]; break;
-        case 'close-tab': d.tabId = +raw[0]; break;
-        case 'upload': d.selector = raw[0]; d.files = parseJsonOrRaw(raw.slice(1).join(' '), [raw[1]]); if (!Array.isArray(d.files)) d.files = [d.files]; break;
-        case 'snapshot': {
-          // snapshot [file.png] [--annotate] [--full] [--fast] ...
-          for (const a of raw) {
-            if (/\.(png|jpe?g)$/i.test(a) && !d.file) d.file = a;
-            else if (a === '--annotate' || a === '-a') d.annotate = true;
-            else if (a === '--full') d.full = true;
-            else if (a === '--fast') d.fast = true;
-            else if (a === '--compact' || a.startsWith('--compact')) d.compact = true;
-            else if (a.startsWith('--selector=')) d.selector = a.slice(11);
-            else if (a.startsWith('--max=')) d.maxElements = +a.slice(6);
-          }
-          break;
-        }
-        case 'act':
-        case 'fast': {
-          const rawStr = raw.join(' ');
-          try {
-            const j = JSON.parse(rawStr);
-            Object.assign(d, j);
-            if (!d.action && j.action) d.action = j.action;
-          } catch {
-            d.action = raw[0];
-            if (raw[1]) {
-              try { Object.assign(d, JSON.parse(raw.slice(1).join(' '))); } catch { d.text = raw.slice(1).join(' '); if (raw[2]) d.selector = raw[1]; }
-            }
-          }
-          d.act = true;
-          // fast 别名默认 fast:true
-          if (type === 'fast') d.fast = true;
-          break;
-        }
-        case 'screenshot': case 'screenshot-full': case 'pdf':
-          if (raw[0]) d.file = raw[0]; // 带文件名 → 该步骤单独执行并保存文件
-          break;
-        case 'sleep': {
-          const ms = +(raw[0] || 1000);
-          return { type: '_sleep', data: { ms } };
-        }
-        default: break; /* 无参数命令 */
-      }
-      if (CLIENT_STEPS.has(type)) return { type, data: d, _client: true, _raw: raw };
-      return { type: pluginType, data: d };
-    });
-
-    // _sleep 与客户端本地步骤单独处理; 带 file 的截图/PDF 步骤单独执行(保存到本地)
-    const batchSteps = norm.filter(s => !s._client && s.type !== '_sleep' && !s.data.file);
-    const fileSteps = norm.filter(s => !s._client && s.type !== '_sleep' && s.data.file);
-    const clientSteps = norm.filter(s => s._client);
-    const sleeps = norm.filter(s => s.type === '_sleep');
-    const results = [];
-    if (batchSteps.length) {
-      const r = await client.batch(batchSteps);
-      results.push(...(r.steps || []));
-    }
-    for (const s of fileSteps) {
-      const t0 = Date.now();
-      try {
-        let r;
-        if (s.type === 'print-to-pdf') r = await client.pdfToFile(s.data.file);
-        else if (s.type === 'screenshot-full') r = await client.screenshotFullToFile(s.data.file);
-        else if (s.type === 'vision-snapshot' || s.type === 'snapshot') {
-          const opts = { ...s.data }; delete opts.file;
-          r = await client.snapshotToFile(s.data.file, opts);
-        } else r = await client.screenshotToFile(s.data.file);
-        results.push({ type: s.type, result: r, _ms: Date.now() - t0 });
-      } catch (e) {
-        results.push({ type: s.type, error: e.message, _ms: Date.now() - t0 });
-      }
-    }
-    for (const s of clientSteps) {
-      const t0 = Date.now();
-      try {
-        let r;
-        switch (s.type) {
-          case 'full': r = await client.fullAnalysis(); break;
-          case 'analyze-all': r = await client.analyzeAllTabs(); break;
-          case 'monitor': r = await client.startMonitor({ interval: +(s._raw?.[0] || 5000), duration: +(s._raw?.[1] || 60000) }); break;
-          case 'monitor-stop': r = await client.stopMonitor(); break;
-          case 'monitor-status': r = await client.getMonitorStatus(); break;
-          case 'report': r = await client.generateReport(s._raw?.[0] || 'browser-report.json'); break;
-          case 'refs': r = await client.refs(s.data.steps || []); break;
-          case 'act':
-          case 'fast': {
-            // 统一走 /act 一次 HTTP 完成高层意图
-            const body = s.data.act ? s.data : { action: s.data.action || s._raw?.[0], ...s.data };
-            // 如果 _raw 是 JSON，直接透传
-            if (s._raw?.length === 1) {
-              try { const j = JSON.parse(s._raw[0]); Object.assign(body, j); } catch {}
-            }
-            r = await client.request('/act', { method: 'POST', body });
-            break;
-          }
-        }
-        results.push({ type: s.type, result: r, _ms: Date.now() - t0 });
-      } catch (e) {
-        results.push({ type: s.type, error: e.message, _ms: Date.now() - t0 });
-      }
-    }
-    for (const s of sleeps) {
-      await new Promise(r => setTimeout(r, s.data.ms));
-      results.push({ type: '_sleep', result: { slept: s.data.ms }, _ms: s.data.ms });
-    }
-    return { success: true, steps: results };
+  if (matches.length === 1) {
+    global.__ARK_EXT_SEL__ = { extId: matches[0].id, conn: matches[0].conn };
+    return matches[0];
   }
-
-  function printHelp() {
-    console.log(`用法: node browser-client.js <command> [args]
-
-基础:        status | tabs | full | debug-info | debug-on | debug-off | cdp-status
-会话:        session | session-create | session-delete <id> [close] | session-assign <id> <tabId>
-            session-release <id> [tabId] | session-tab <id> <url>
-            (session-delete ... close: 同时关闭该会话标签页; session-tab 默认后台打开不抢焦点)
-            (全局参数: --session <id> 使本次命令在会话内执行; --body-file <path> 从 UTF-8 JSON 读 POST body)
-链式:        chain "cmd args" "cmd args" ...    (一次 HTTP+WS 往返, 支持 --- 分隔)
-             chain --body-file steps.json       (文件含 {"steps":[插件命令...]}, 完整 JSON 免转义)
-导航:        open <url> | open-current <url> | reload | back | forward | tab <id> | close-tab <id>
-页面:        page-info | dom | html [sel] | frames | layout | query <sel> | query-all <sel> [n]
-            query-many <json> | exists <sel> | text [sel] | attr <sel> <name> | value <sel>
-操作:        click <sel> | hover <sel> | dblclick <sel> | rightclick <sel> | drag <sel> <json|target>
-            mouse <type> <x> <y> | scroll <x> <y> | scroll-top | scroll-bottom
-            scroll-into-view <sel> | scroll-by <x> <y>
-输入:        type <sel|text> <text...> | key <key> [modifiers...] | fill <json>
-            select <sel> <value|json> | check <sel> [on|off] | clear-field <sel> | focus <sel>
-            f12 | f5 | enter | escape
-JS/等待:    evaluate <code> | wait-for <sel> [ms] | wait-for-text <text> [ms] [sel]
-            wait-for-url <pattern> [ms] | wait-load
- 视觉:        snapshot [file] [--annotate] [--full] [--selector <sel>] [--max <n>]   (截图+锚点原子返回，视觉模型首选)
- 截图/PDF:   screenshot [file] | screenshot-full [file] | screenshot-element <sel>
-            pdf [file] [format] | upload <sel> <file...>
-高亮:        highlight <sel> [color] [label] | highlight-clear
-Cookie:      cookies | cookie-set <name> <value> | cookie-remove <name> [url]
-            storage [local|session] | storage-set <key> <value> [type] | storage-remove <key> [type] | storage-clear [type]
-网络:        network [filter] | network-clear | network-conditions <json|offline> | network-reset
-            block <pattern...> | unblock | response-body <urlPattern> | cache-off [on|off] | csp [on|off]
-性能:        performance | vitals | resources | cpu <rate>
-检查:        a11y | seo | security | console [n] | console-clear | dom-changes | dom-changes-clear
-模拟:        device <name|json> | device-clear | media <json> | dark | dark-off | auto-dark [on|off]
-            geo <lat> <lng> [accuracy] | locale <locale> | timezone <tz>
-            js [on|off] | cpu-count <n>
-清理:        cleanup              (一键恢复: 设备/媒体/geo/时区/语言/CPU/JS/并发/网络/CSP/缓存/暗色/高亮/弹窗策略)
-弹窗:        dialog [accept|dismiss] [promptText] | dialog auto [on|off] | dialogs (查看记录)
-批量:        analyze-all | monitor [ms] [s] | monitor-stop | monitor-status
-审计:        audit [url] | audit-html [file] [url] | audit-md [file] [url]
-            history [url] | audit-run <json|url> | audit-status <taskId>
-报告:        report [file.json]
-
-示例:
-  node browser-client.js open https://example.com
-  node browser-client.js chain "open https://example.com" "wait-load" "page-info" "screenshot"
-  node browser-client.js chain "open https://example.com" "click #btn" "dialog accept" "full"
-  node browser-client.js evaluate "return document.title"
-  node browser-client.js click "#search-button"
-  node browser-client.js fill '[{"selector":"#user","value":"admin"},{"selector":"#pass","value":"123"}]'
-  node browser-client.js pdf report.pdf
-  node browser-client.js audit-html perf.html https://example.com
-  node browser-client.js audit-run '["https://a.com","https://b.com"]'
-`);
+  if (matches.length > 1) {
+    fail('E_AMBIGUOUS_TAB', `tabId ${tabId} 在多个浏览器中存在`, `用 --ext <id|browser> 明确指定：${matches.map((e) => `${e.browser}:${e.id}`).join(', ')}`);
   }
-
-  run();
+  return null;
 }
 
-// 暴露连接参数解析(脚本/测试可直接复用: 自动从 ~/.ark-web/token 读令牌、从环境变量读端口)
-BrowserClient.resolveConnection = resolveConnection;
+/** fanout 用：子进程跑同一条 CLI，避免全局 --ext 在并发中互相覆盖 */
+function runSelfJson(argv, timeoutMs = 180000) {
+  return new Promise((resolve) => {
+    const p = spawn(process.execPath, [SELF, ...argv, '--json'], {
+      env: { ...process.env, ARK_WEB_JSON: '1' },
+      windowsHide: true
+    });
+    let out = '', err = '';
+    const timer = setTimeout(() => { p.kill(); resolve({ ok: false, error: { code: 'E_FANOUT_TIMEOUT', message: `${timeoutMs}ms` } }); }, timeoutMs);
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('close', () => {
+      clearTimeout(timer);
+      const line = out.trim().split('\n').filter(Boolean).pop() || '';
+      try { resolve(JSON.parse(line)); }
+      catch { resolve({ ok: false, error: { code: 'E_NO_JSON', message: (err || out).slice(0, 240) } }); }
+    });
+  });
+}
 
-module.exports = BrowserClient;
+function parseArgs(argv) {
+  const positional = [];
+  const opts = {};
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--') { positional.push(...argv.slice(i + 1)); break; }
+    if (a.startsWith('--')) {
+      const key = a.slice(2);
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) opts[key] = true;
+      else { opts[key] = next; i++; }
+    } else positional.push(a);
+  }
+  return { positional, opts };
+}
+
+function fail(code, message, hint) {
+  const e = new Error(message);
+  e.code = code;
+  if (hint) e.hint = hint;
+  throw e;
+}
+
+// ── chain 取值插值：{{steps.0.items.0.ref}} / {{last.data.x}} ─────────────────
+function jpath(obj, path) {
+  const segs = [];
+  for (const raw of String(path).split('.')) {
+    const m = raw.match(/^([A-Za-z_$][\w$]*)((?:\[\d+\])*)$/);
+    if (m) {
+      segs.push(m[1]);
+      for (const idx of m[2].match(/\d+/g) || []) segs.push(Number(idx));
+    } else if (/^\d+$/.test(raw)) {
+      segs.push(Number(raw));          // steps.0.items.0.ref 这种纯数字下标
+    } else {
+      return undefined;
+    }
+  }
+  let cur = obj;
+  for (const s of segs) { if (cur == null) return undefined; cur = cur[s]; }
+  return cur;
+}
+
+function interpolate(text, ctx) {
+  return String(text).replace(/\{\{\s*([^}]+?)\s*\}\}/g, (whole, expr) => {
+    const v = jpath(ctx, expr);
+    if (v === undefined) return whole;            // 取不到就原样保留，方便定位写错的地方
+    if (v === null) return '';
+    const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    // 始终加引号并转义，避免页面文本里的空格/引号/换行注入额外参数
+    return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n') + '"';
+  });
+}
+
+/** 支持双引号、单引号与必要转义的轻量 tokenizer（不吞 Windows 路径里的反斜杠） */
+function tokenize(text) {
+  const s = String(text);
+  const out = [];
+  let cur = '';
+  let quote = null;
+  let esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (esc) {
+      cur += ch === 'n' ? '\n' : ch === 't' ? '\t' : ch;
+      esc = false;
+      continue;
+    }
+    if (ch === '\\') {
+      const next = s[i + 1];
+      if (next && /["'\\nt ]/.test(next)) { esc = true; continue; }
+      cur += ch;                 // D:\a.pdf 这类路径保留反斜杠
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (/\s/.test(ch)) {
+      if (cur) { out.push(cur); cur = ''; }
+      continue;
+    }
+    cur += ch;
+  }
+  if (esc) cur += '\\';
+  if (cur) out.push(cur);
+  return out;
+}
+
+const num = (v, d, name) => {
+  if (v === undefined) return d;
+  if (v === true) fail('E_PARAM', `--${name || 'value'} 需要一个数字，但没有给值`, '例：--limit 40');
+  const n = Number(v);
+  if (!Number.isFinite(n)) fail('E_PARAM', `--${name || 'value'} 需要数字，收到 "${v}"`, '检查参数取值');
+  return n;
+};
+const positiveInt = (v, name) => {
+  const n = num(v, undefined, name);
+  if (n === undefined) return undefined;
+  if (!Number.isInteger(n) || n <= 0) fail('E_PARAM', `--${name} 需要正整数，收到 "${v}"`, '例：--ref 12');
+  return n;
+};
+const bool = (v) => v === true || v === 'true' || v === '1';
+const str = (v) => (v === undefined || v === true ? undefined : String(v));
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function compact(obj) {
+  if (Array.isArray(obj)) return obj.map(compact);
+  if (!obj || typeof obj !== 'object') return obj;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === null || v === undefined || v === '') continue;
+    out[k] = (v && typeof v === 'object') ? compact(v) : v;
+  }
+  return out;
+}
+
+function toCsv(rows) {
+  if (!rows.length) return '';
+  const headers = [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  const esc = (v) => {
+    const s = v == null ? '' : String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  return [headers.join(','), ...rows.map((r) => headers.map((h) => esc(r[h])).join(','))].join('\n');
+}
+
+const tabArgs = (opts) => (opts.tab !== undefined ? { tabId: positiveInt(opts.tab, 'tab') } : {});
+
+// ── 命令注册表 ─────────────────────────────────────────────────────────────
+const P = (type, desc, extra = {}) => ({ type, desc, ...extra });
+
+const COMMANDS = {
+  status: {
+    summary: '桥接与扩展的连接状态；AI 每次开始操作前先跑这个',
+    params: {},
+    run: async () => api('/status')
+  },
+
+  describe: {
+    summary: '列出全部命令及其参数（机器可读），或用 describe <cmd> 看单个命令',
+    params: { cmd: P('string', '要查看的命令名；省略则返回全部') },
+    run: async (pos) => {
+      const want = pos[0];
+      if (want) {
+        const c = COMMANDS[want];
+        if (!c) fail('E_UNKNOWN_CMD', `没有命令 ${want}`, '先跑 describe 看可用命令');
+        return { name: want, summary: c.summary, params: c.params, example: c.example ?? null };
+      }
+      return {
+        version: VERSION,
+        transport: BASE,
+        envelope: { ok: '{ok, cmd, data}', error: '{ok, cmd, error:{code,message,hint}}' },
+        output: { human: '默认', json: '--json 或 ARK_WEB_JSON=1' },
+        commands: Object.entries(COMMANDS)
+          .filter(([n]) => n !== 'help')
+          .map(([n, c]) => ({ name: n, summary: c.summary, params: c.params }))
+      };
+    }
+  },
+
+  tabs: {
+    summary: '列出全部标签页；多浏览器时自动聚合，可用 --ext/--browser 过滤',
+    params: { ext: P('string', 'all | extId | 浏览器名（chrome/edge），省略=全部') },
+    run: async (pos, opts) => {
+      const exts = opts.conn
+        ? (await listExtensions()).filter((e) => e.conn === String(opts.conn))
+        : await resolveExts(opts.ext || opts.browser);
+      if (!exts.length) fail('E_EXT_NOT_FOUND', `没有匹配的连接：${opts.conn}`, '重跑 status 获取最新 conn');
+      const errors = [];
+      const batches = await Promise.all(exts.map(async (e) => {
+        try {
+          const list = await cmd('tabs', {}, 30000, { extId: e.id, conn: e.conn });
+          return (Array.isArray(list) ? list : []).map((t) => ({ ...t, extId: e.id, browser: e.browser, conn: e.conn }));
+        } catch (err) {
+          errors.push({ extId: e.id, browser: e.browser, code: err.code || 'E_TABS', message: err.message });
+          return [];
+        }
+      }));
+      const tabs = batches.flat();
+      return {
+        count: tabs.length, tabs,
+        ...(exts.length > 1 ? { browsers: exts.map((e) => ({ extId: e.id, browser: e.browser })) } : {}),
+        ...(errors.length ? { errors } : {})
+      };
+    }
+  },
+
+  open: {
+    summary: '打开页面；默认先挂 CDP 再导航，网络从第一字节就能抓',
+    params: {
+      url: P('string', '目标 URL', { required: true }),
+      'tab-bg': P('flag', '后台打开，不切换当前标签'),
+      capture: P('bool', '是否开网络捕获，默认 true'),
+      wait: P('bool', '是否等加载完成，默认 true'),
+      timeout: P('number', '加载超时 ms', { default: 30000 })
+    },
+    example: 'open https://example.com --tab-bg',
+    run: async (pos, opts) => {
+      const url = pos[0];
+      if (!url) fail('E_PARAM', '缺少 url', '用法: open <url> [--tab-bg] [--capture false]');
+      return cmd('open', {
+        url,
+        waitLoad: opts.wait !== 'false',
+        timeoutMs: num(opts.timeout, 30000, 'timeout'),
+        active: opts['tab-bg'] !== true,
+        capture: opts.capture !== 'false'
+      }, 90000);
+    }
+  },
+
+  close: {
+    summary: '关闭标签页',
+    params: { id: P('number', '标签页 id'), tab: P('number', '同 id，--tab 形式') },
+    run: async (pos, opts) => {
+      const id = opts.tab ?? pos[0];
+      if (id == null) fail('E_PARAM', '缺少标签页 id', '用法: close --tab <id>');
+      return cmd('close', { tabId: positiveInt(id, 'tab') });
+    }
+  },
+
+  activate: {
+    summary: '切换到指定标签页（会更新默认操作标签）',
+    params: { id: P('number', '标签页 id'), tab: P('number', '同 id') },
+    run: async (pos, opts) => {
+      const id = opts.tab ?? pos[0];
+      if (id == null) fail('E_PARAM', '缺少标签页 id', '用法: activate --tab <id>');
+      return cmd('activate', { tabId: positiveInt(id, 'tab') });
+    }
+  },
+
+  info: {
+    summary: '当前标签页信息（id/url/title/status/视口）',
+    params: { tab: P('number', '标签页 id；省略用最近操作的标签') },
+    run: async (pos, opts) => cmd('info', { ...tabArgs(opts) })
+  },
+
+  snapshot: {
+    summary: '语义快照：跨 iframe/shadow 采集元素（带上下文与 ref），可选截图并把编号烧进图里',
+    params: {
+      file: P('string', '截图保存路径', { default: 'snapshot.webp' }),
+      limit: P('number', '返回元素数上限', { default: 40 }),
+      max: P('number', '采集上限', { default: 400 }),
+      format: P('string', 'webp|png|jpeg', { default: 'webp' }),
+      quality: P('number', '1-100', { default: 80 }),
+      full: P('flag', '整页截图'),
+      shot: P('flag', '同时截图（默认只回结构，不截图更快；需要视觉快照时才加）'),
+      focus: P('flag', '截图时允许临时聚焦浏览器窗口（最小化/被遮挡时用）'),
+      'no-shot': P('flag', '兼容旧用法：强制不截图'),
+      timeout: P('number', '截图超时毫秒（默认自动分级 900/2500/8000）'),
+      'no-boxes': P('flag', '截图不带编号框'),
+      'in-view': P('flag', '只要当前视口内的元素'),
+      diff: P('flag', '与上次快照对比，只回变化'),
+      hidden: P('flag', '包含不可见元素（排查用）'),
+      tab: P('number', '标签页 id')
+    },
+    example: 'snapshot s.webp --limit 60 --diff',
+    run: async (pos, opts) => {
+      const file = pos[0] ?? 'snapshot.webp';
+      const format = opts.format ?? (file.endsWith('.png') ? 'png' : 'webp');
+      const shot = opts.shot === true && opts['no-shot'] !== true;
+      const data = await cmd('snapshot', {
+        ...tabArgs(opts),
+        limit: num(opts.limit, 40, 'limit'),
+        max: num(opts.max, 400, 'max'),
+        inView: bool(opts['in-view']),
+        diff: opts.diff === true,
+        hidden: opts.hidden === true,
+        shot,
+        focus: opts.focus === true,
+        boxes: opts['no-boxes'] !== true,
+        format,
+        quality: num(opts.quality, 80, 'quality'),
+        full: opts.full === true,
+        timeoutMs: opts.timeout == null ? undefined : num(opts.timeout, 0, 'timeout')
+      }, 120000);
+      if (data.shot && data.shot.base64) {
+        const buf = Buffer.from(data.shot.base64, 'base64');
+        writeFileSync(file, buf);
+        data.shot = {
+          file, bytes: buf.length, format: data.shot.format, clip: data.shot.clip, viewportForced: data.shot.viewportForced,
+          ...(data.shot.uniform ? { uniform: true } : {})
+        };
+      }
+      return data;
+    }
+  },
+
+  find: {
+    summary: '语义定位：按文字/占位符/aria 找元素，直接告诉你「能不能点、为什么不能点」',
+    params: {
+      text: P('string', '要查找的文字/aria-label/placeholder/title/name/id 片段'),
+      role: P('string', '限定角色：button|link|textbox|combobox|menuitem|tab|checkbox'),
+      selector: P('string', '只在这个选择器范围内找'),
+      limit: P('number', '最多返回几个候选', { default: 5 }),
+      hidden: P('flag', '包含不可见元素（排查用）'),
+      tab: P('number', '标签页 id')
+    },
+    example: 'find --text "提交订单" --role button',
+    run: async (pos, opts) => {
+      if (!opts.text && !opts.selector) {
+        fail('E_PARAM', '需要 --text', '例：find --text "登录"；也可 find --selector ".btn" 检查可点性');
+      }
+      return cmd('find', {
+        ...tabArgs(opts),
+        text: str(opts.text) ?? '',
+        role: str(opts.role) ?? null,
+        selector: str(opts.selector) ?? null,
+        limit: num(opts.limit, 5, 'limit'),
+        hidden: opts.hidden === true
+      }, 45000);
+    }
+  },
+
+  click: {
+    summary: '真实点击（CDP 输入域）：预检遮挡/禁用，点完自动判断跳转/DOM 变化/无反应，并追踪新标签',
+    params: {
+      ref: P('number', 'SoM 编号（snapshot 或 find 得到）'),
+      selector: P('string', 'CSS 选择器'),
+      force: P('flag', '跳过 ref 指纹校验与遮挡拦截'),
+      'no-confirm': P('flag', '不等效果确认（省 1 秒，但拿不到「点没点上」的判断）'),
+      count: P('number', '连击次数', { default: 1 }),
+      'hold-ms': P('number', '按下保持毫秒（长按场景）'),
+      tab: P('number', '标签页 id')
+    },
+    example: 'click --ref 12   →  {settled:true, mutated:true, via:"cdp"}',
+    run: async (pos, opts) => {
+      if (opts.ref == null && !opts.selector) {
+        fail('E_PARAM', '需要 --ref 或 --selector', '先跑 find --text "提交" 拿 ref');
+      }
+      return cmd('click', {
+        ...tabArgs(opts),
+        ref: positiveInt(opts.ref, 'ref'),
+        selector: str(opts.selector) ?? null,
+        force: opts.force === true,
+        confirm: opts['no-confirm'] !== true,
+        count: num(opts.count, 1, 'count'),
+        holdMs: num(opts['hold-ms'], 0, 'hold-ms')
+      }, 60000);
+    }
+  },
+
+  fill: {
+    summary: '填写输入框/富文本（真实 insertText，填完回读校验）；--type 逐字符输入',
+    params: {
+      ref: P('number', 'SoM 编号'),
+      selector: P('string', 'CSS 选择器'),
+      text: P('string', '要填的文本'),
+      'body-file': P('string', '从文件读取文本，避免命令行编码问题'),
+      type: P('flag', '逐字符输入（联想/字数统计/富文本更可靠）'),
+      delay: P('number', '逐字符间隔 ms', { default: 25 }),
+      submit: P('flag', '填完回车提交'),
+      force: P('flag', '跳过 ref 指纹校验'),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      let text = opts.text;
+      if (opts['body-file']) text = readFileSync(String(opts['body-file']), 'utf8');
+      if (text === undefined) fail('E_PARAM', '缺少 --text 或 --body-file', '例：fill --ref 3 --text "hello"');
+      return cmd('fill', {
+        ...tabArgs(opts),
+        ref: positiveInt(opts.ref, 'ref'),
+        selector: str(opts.selector) ?? null,
+        text: String(text),
+        type: opts.type === true,
+        delay: num(opts.delay, 25, 'delay'),
+        submit: opts.submit === true,
+        force: opts.force === true
+      }, 60000);
+    }
+  },
+
+  hover: {
+    summary: '真实悬停（驱动 CSS :hover）；回 hoverActive 证明浏览器认了这次移动',
+    params: {
+      ref: P('number', 'SoM 编号'), selector: P('string', 'CSS 选择器'), tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      if (opts.ref == null && !opts.selector) fail('E_PARAM', '需要 --ref 或 --selector', '例：hover --ref 5');
+      return cmd('hover', { ...tabArgs(opts), ref: positiveInt(opts.ref, 'ref'), selector: str(opts.selector) ?? null });
+    }
+  },
+
+  press: {
+    summary: '真实按键/组合键（含 Tab/Escape/Enter 等默认行为）',
+    params: {
+      key: P('string', '如 Enter、Escape、Ctrl+Enter', { default: 'Enter' }),
+      ref: P('number', '先聚焦该元素'),
+      selector: P('string', '先聚焦该元素'),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => cmd('press', {
+      ...tabArgs(opts),
+      ref: positiveInt(opts.ref, 'ref'),
+      selector: str(opts.selector) ?? null,
+      key: String(opts.key ?? 'Enter')
+    }, 45000)
+  },
+
+  select: {
+    summary: '下拉选择：原生 select 直接选；自定义下拉自动「点开→按文本点选项」',
+    params: {
+      ref: P('number', 'SoM 编号'),
+      selector: P('string', 'CSS 选择器'),
+      values: P('string', '逗号分隔的值或选项文本'),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      const vals = str(opts.values) ?? str(opts.value);
+      if (!vals) fail('E_PARAM', '缺少 --values', '例：select --ref 8 --values "CN"');
+      return cmd('select', {
+        ...tabArgs(opts),
+        ref: positiveInt(opts.ref, 'ref'),
+        selector: str(opts.selector) ?? null,
+        values: String(vals).split(',').map((s) => s.trim()).filter(Boolean)
+      }, 60000);
+    }
+  },
+
+  shot: {
+    summary: '截图保存到文件；带 --selector/--ref 只截该元素（滚动后坐标仍然准确）',
+    params: {
+      file: P('string', '保存路径', { default: 'shot.webp' }),
+      selector: P('string', '元素选择器，截该元素'),
+      ref: P('number', '元素 SoM 编号'),
+      format: P('string', 'webp|png|jpeg'),
+      quality: P('number', '1-100', { default: 85 }),
+      full: P('flag', '整页'),
+      focus: P('flag', '允许临时聚焦浏览器窗口（默认不抢焦点）'),
+      timeout: P('number', '超时毫秒（默认自动分级 900/2500/8000）'),
+      diff: P('flag', '与上一次同目标截图比较，返回变化率与包围盒'),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      const file = pos[0] ?? 'shot.webp';
+      const format = opts.format ?? (file.endsWith('.png') ? 'png' : 'webp');
+      const r = await cmd('shot', {
+        ...tabArgs(opts),
+        format,
+        quality: num(opts.quality, 85, 'quality'),
+        full: opts.full === true,
+        selector: str(opts.selector) ?? null,
+        ref: positiveInt(opts.ref, 'ref'),
+        focus: opts.focus === true,
+        diff: opts.diff === true,
+        timeoutMs: opts.timeout == null ? undefined : num(opts.timeout, 0, 'timeout')
+      }, 90000);
+      const buf = Buffer.from(r.base64, 'base64');
+      writeFileSync(file, buf);
+      return {
+        file, bytes: buf.length, format, clip: r.clip, viewportForced: r.viewportForced, focused: r.focused,
+        vw: r.vw, vh: r.vh,
+        ...(r.uniform ? { uniform: true } : {}),
+        ...(r.blankRetries ? { blankRetries: r.blankRetries } : {}),
+        ...(r.diff ? { diff: r.diff } : {})
+      };
+    }
+  },
+
+  eval: {
+    summary: '在页面上下文执行 JS 表达式（CDP Runtime.evaluate，等待 Promise）',
+    params: { code: P('string', 'JS 表达式', { required: true }), tab: P('number', '标签页 id') },
+    example: 'eval "document.title"',
+    run: async (pos, opts) => {
+      const code = pos[0] ?? str(opts.code);
+      if (!code) fail('E_PARAM', '缺少 JS 代码', '用法: eval "document.title"');
+      return cmd('eval', { ...tabArgs(opts), code: String(code) }, 45000);
+    }
+  },
+
+  scroll: {
+    summary: '滚动页面',
+    params: { dy: P('number', '纵向像素', { default: 600 }), dx: P('number', '横向像素'), tab: P('number', '标签页 id') },
+    run: async (pos, opts) => cmd('scroll', {
+      ...tabArgs(opts),
+      dy: num(opts.dy, 600, 'dy'),
+      dx: num(opts.dx, 0, 'dx')
+    }, 45000)
+  },
+
+  attr: {
+    summary: '读元素全部属性、语义上下文、可见性与包围盒',
+    params: { ref: P('number', 'SoM 编号'), selector: P('string', 'CSS 选择器'), tab: P('number', '标签页 id') },
+    run: async (pos, opts) => {
+      if (opts.ref == null && !opts.selector) fail('E_PARAM', '需要 --ref 或 --selector', '例：attr --ref 12');
+      return cmd('attr', { ...tabArgs(opts), ref: positiveInt(opts.ref, 'ref'), selector: str(opts.selector) ?? null });
+    }
+  },
+
+  text: {
+    summary: '抽取页面正文（Markdown 风格），适合让 AI 读内容',
+    params: {
+      'max-len': P('number', '最大字符数', { default: 20000 }),
+      out: P('string', '写入文件'),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      const maxLen = num(opts['max-len'], 20000, 'max-len');
+      const r = await cmd('text', { ...tabArgs(opts), maxLen }, 60000);
+      const data = {
+        url: r.url, title: r.title, chars: r.chars, text: r.text, truncated: r.truncated,
+        ...(r.frames ? { frames: r.frames } : {})
+      };
+      if (opts.out) { writeFileSync(String(opts.out), r.text, 'utf8'); data.file = String(opts.out); }
+      return data;
+    }
+  },
+
+  extract: {
+    summary: '结构化抽取：列表页 → 行数组（跨 shadow DOM），可翻页采集',
+    params: {
+      selector: P('string', '每行容器的 CSS 选择器', { required: true }),
+      fields: P('string', '字段表 "name:sel, name2:sel2@attr"，self 表示容器自身，@href/@src 自动补绝对地址', { required: true }),
+      limit: P('number', '每页最多行数', { default: 50 }),
+      paginate: P('flag', '翻页采集（必须配 --next）'),
+      next: P('string', '下一页控件选择器'),
+      'max-pages': P('number', '最多翻几页（含首页）', { default: 5 }),
+      delay: P('number', '翻页后每轮探测等待毫秒', { default: 800 }),
+      scroll: P('number', '改为「滚动加载」模式：滚几轮（每轮采一次，自动去重）'),
+      step: P('number', '滚动模式下每轮滚动像素', { default: 700 }),
+      dedupe: P('string', '按该字段去重；省略则按整行内容去重'),
+      out: P('string', '写入文件（.json 或 .csv）'),
+      'no-meta': P('flag', '去掉 _index 元字段'),
+      compact: P('flag', '丢弃空字段'),
+      tab: P('number', '标签页 id')
+    },
+    example: 'extract --selector ".item" --fields "title:h3, link:a@href" --paginate --next "a.next"',
+    run: async (pos, opts) => {
+      if (!opts.selector) fail('E_PARAM', '缺少 --selector', '例：--selector ".item"');
+      if (!opts.fields) fail('E_PARAM', '缺少 --fields', '例：--fields "title:h3, link:a@href"');
+
+      const meta = opts['no-meta'] !== true;
+      const perPage = num(opts.limit, 50, 'limit');
+      const grab = () => cmd('extract', {
+        ...tabArgs(opts), selector: String(opts.selector), fields: String(opts.fields), limit: perPage, meta
+      }, 90000);
+      const grabRetry = async (tries = 3) => {
+        let last;
+        for (let i = 0; i < tries; i++) {
+          try { return await grab(); } catch (e) { last = e; await sleep(400 + 400 * i); }
+        }
+        throw last;
+      };
+      const dump = (rows, data) => {
+        if (!opts.out) return data;
+        const f = String(opts.out);
+        if (f.endsWith('.csv')) writeFileSync(f, toCsv(rows), 'utf8');
+        else writeFileSync(f, JSON.stringify(rows, null, 2), 'utf8');
+        data.file = f;
+        data.fileBytes = Buffer.byteLength(JSON.stringify(rows));
+        return data;
+      };
+
+      if (opts.paginate !== true && opts.scroll !== undefined && opts.scroll !== false) {
+        // 无限滚动 / 虚拟列表：滚一段采一段，按整行内容去重，连续两轮没新行就停
+        const rounds = Math.max(1, Math.min(60, num(opts.scroll === true ? 6 : opts.scroll, 6, 'scroll')));
+        const seen = new Set();
+        const all = [];
+        const detail = [];
+        let head = null;
+        for (let i = 0; i < rounds; i++) {
+          const r = await grabRetry();
+          if (!head) head = r;
+          let added = 0;
+          for (const row of r.rows) {
+            const k = JSON.stringify(row);
+            if (seen.has(k)) continue;
+            seen.add(k); all.push(row); added++;
+          }
+          detail.push({ round: i + 1, matched: r.count, added, url: r.url });
+          if (i > 0 && added === 0) break;
+          if (i < rounds - 1) {
+            await cmd('scroll', { ...tabArgs(opts), dy: num(opts.step, 700, 'step') });
+            await sleep(450);
+          }
+        }
+        if (meta) all.forEach((row, i) => { row._index = i; });
+        const rows = opts.compact === true ? compact(all) : all;
+        return dump(rows, {
+          url: head.url, title: head.title, fields: head.fields,
+          mode: 'scroll', rounds: detail.length, pageDetail: detail,
+          count: all.length, returned: rows.length, truncated: false, rows
+        });
+      }
+
+      if (opts.paginate !== true) {
+        const r = await grabRetry();
+        const rows = opts.compact === true ? compact(r.rows) : r.rows;
+        return dump(rows, {
+          url: r.url, title: r.title, frame: r.frame,
+          count: r.count, returned: r.returned, truncated: r.truncated,
+          fields: r.fields, rows
+        });
+      }
+
+      if (!opts.next) fail('E_PARAM', '--paginate 需要 --next <下一页控件选择器>', '例：--next "a.next"');
+      const nextSel = String(opts.next);
+      const maxPages = Math.max(1, num(opts['max-pages'], 5, 'max-pages'));
+      const delay = Math.max(200, num(opts.delay, 800, 'delay'));
+      const dedupeField = str(opts.dedupe) ?? null;
+
+      const strip = (row) => { const o = { ...row }; delete o._index; return o; };
+      const keyOf = (row) => (dedupeField ? String(row[dedupeField] ?? '') : JSON.stringify(strip(row)));
+      const sigOf = (rows) => rows.slice(0, 3).map((r) => JSON.stringify(strip(r))).join('|');
+
+      let cur = await grabRetry();
+      const head = { url: cur.url, title: cur.title, fields: cur.fields };
+      const pages = [];
+      const seen = new Set();
+      const all = [];
+      let duplicates = 0;
+      let stopReason = 'max-pages';
+
+      for (let p = 1; ; p++) {
+        let added = 0;
+        for (const row of cur.rows) {
+          const k = keyOf(row);
+          if (seen.has(k)) { duplicates++; continue; }
+          seen.add(k); all.push(row); added++;
+        }
+        pages.push({ page: p, url: cur.url, matched: cur.count, returned: cur.rows.length, added });
+        if (p >= maxPages) { stopReason = 'max-pages'; break; }
+
+        let el = null;
+        try { el = await cmd('attr', { ...tabArgs(opts), selector: nextSel }); } catch { el = null; }
+        if (!el) { stopReason = 'no-next'; break; }
+        if (el.visible === false) { stopReason = 'next-hidden'; break; }
+        if (el.enabled === false || (el.attrs && el.attrs['aria-disabled'] === 'true')) { stopReason = 'next-disabled'; break; }
+
+        const beforeUrl = cur.url;
+        const beforeSig = sigOf(cur.rows);
+        try { await cmd('click', { ...tabArgs(opts), selector: nextSel, confirm: false }); }
+        catch (e) {
+          stopReason = 'click-failed';
+          pages[pages.length - 1].note = String(e.message || e).slice(0, 120);
+          break;
+        }
+
+        let nxt = null;
+        const deadline = Date.now() + Math.max(6000, delay * 8);
+        while (Date.now() < deadline) {
+          await sleep(Math.max(250, Math.min(delay, 900)));
+          try {
+            const r = await grab();
+            if (r.url !== beforeUrl || sigOf(r.rows) !== beforeSig) { nxt = r; break; }
+          } catch { /* 导航中，继续等 */ }
+        }
+        if (!nxt) { stopReason = 'stalled'; break; }
+        cur = nxt;
+      }
+
+      if (meta) all.forEach((row, i) => { row._index = i; });
+      const rows = opts.compact === true ? compact(all) : all;
+      const matched = pages.reduce((s, x) => s + x.matched, 0);
+      return dump(rows, {
+        url: head.url, title: head.title, fields: head.fields,
+        pages: pages.length, pageDetail: pages,
+        count: matched, collected: all.length, duplicates,
+        returned: rows.length,
+        truncated: pages.some((x) => x.matched > x.returned),
+        stopReason, rows
+      });
+    }
+  },
+
+  table: {
+    summary: 'HTML 表格 → 对象数组（自动识别表头，跨 iframe/shadow）',
+    params: {
+      selector: P('string', '表格选择器，省略取第一个 table'),
+      index: P('number', '第几个表格，从 0 开始', { default: 0 }),
+      limit: P('number', '最大行数', { default: 200 }),
+      out: P('string', '写入 .json / .csv'),
+      tab: P('number', '标签页 id')
+    },
+    example: 'table --selector "#prices" --out prices.csv',
+    run: async (pos, opts) => {
+      const r = await cmd('table', {
+        ...tabArgs(opts),
+        selector: str(opts.selector) ?? null,
+        index: num(opts.index, 0, 'index'),
+        limit: num(opts.limit, 200, 'limit')
+      }, 90000);
+      const data = {
+        tablesFound: r.tablesFound, index: r.index, caption: r.caption ?? '',
+        header: r.header, totalRows: r.totalRows, returned: r.returned, truncated: r.truncated, rows: r.rows
+      };
+      if (opts.out) {
+        const f = String(opts.out);
+        if (f.endsWith('.csv')) writeFileSync(f, toCsv(r.rows), 'utf8');
+        else writeFileSync(f, JSON.stringify(r.rows, null, 2), 'utf8');
+        data.file = f;
+      }
+      return data;
+    }
+  },
+
+  state: {
+    summary: '提取页面内嵌结构化数据：JSON-LD / __NEXT_DATA__ / __INITIAL_STATE__ / og:meta',
+    params: { 'max-len': P('number', '每个来源最多字符数', { default: 6000 }), tab: P('number', '标签页 id') },
+    example: 'state --max-len 3000',
+    run: async (pos, opts) => cmd('state', { ...tabArgs(opts), maxLen: num(opts['max-len'], 6000, 'max-len') }, 45000)
+  },
+
+  assert: {
+    summary: '断言页面状态（文本/值/属性/可见性/数量），让 AI 能自证操作成功',
+    params: {
+      selector: P('string', '目标选择器'),
+      ref: P('number', '目标 ref'),
+      text: P('string', '期望包含的文本'),
+      value: P('string', '期望的输入值'),
+      attr: P('string', '期望存在的属性名'),
+      equals: P('string', '配合 --attr 的期望值'),
+      count: P('number', '期望匹配数量'),
+      visible: P('bool', '期望可见/不可见'),
+      exact: P('flag', '文本精确匹配'),
+      tab: P('number', '标签页 id')
+    },
+    example: 'assert --selector "#total" --text "¥120"',
+    run: async (pos, opts) => {
+      if (!opts.selector && opts.ref == null) fail('E_PARAM', 'assert 需要 --selector 或 --ref', '例：assert --selector "#total" --text "¥120"');
+      const r = await cmd('assert', {
+        ...tabArgs(opts),
+        selector: str(opts.selector) ?? null,
+        ref: positiveInt(opts.ref, 'ref'),
+        text: str(opts.text),
+        value: str(opts.value),
+        attr: str(opts.attr),
+        equals: str(opts.equals),
+        count: opts.count === undefined ? undefined : num(opts.count, undefined, 'count'),
+        visible: opts.visible === undefined ? undefined : bool(opts.visible),
+        exact: opts.exact === true
+      }, 30000);
+      if (r.pass !== true) {
+        const e = new Error(`断言失败（${r.kind || 'unknown'}）：实际 ${JSON.stringify(r.actual)}，期望 ${JSON.stringify(r.expected)}`);
+        e.code = 'E_ASSERT';
+        e.hint = '如果页面确实如此，说明前置操作没生效；否则放宽断言条件';
+        e.data = r;
+        throw e;
+      }
+      return r;
+    }
+  },
+
+  console: {
+    summary: '读控制台日志（含未捕获异常）',
+    params: {
+      level: P('string', '按级别过滤：log|warning|error|exception'),
+      limit: P('number', '返回条数', { default: 100 }),
+      clear: P('flag', '读完清空缓冲'),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => cmd('console', {
+      ...tabArgs(opts),
+      level: str(opts.level) ?? null,
+      limit: num(opts.limit, 100, 'limit'),
+      clear: opts.clear === true
+    }, 45000)
+  },
+
+  net: {
+    summary: '网络请求清单（方法/状态/大小/耗时/postData），只含挂载后发出的请求',
+    params: {
+      limit: P('number', '返回条数（最新在前）', { default: 30 }),
+      filter: P('string', 'URL 关键词过滤'),
+      type: P('string', '类型过滤：document|xhr|script|image|stylesheet|fetch'),
+      errors: P('flag', '只看失败与 4xx/5xx'),
+      clear: P('flag', '读前清空缓冲'),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => cmd('network', {
+      ...tabArgs(opts),
+      limit: num(opts.limit, 30, 'limit'),
+      filter: str(opts.filter) ?? null,
+      type: str(opts.type) ?? null,
+      errors: opts.errors === true,
+      clear: opts.clear === true
+    }, 45000)
+  },
+
+  'net-body': {
+    summary: '取某个请求的响应正文（requestId 来自 net）',
+    params: {
+      requestId: P('string', '请求 id', { required: true }),
+      'max-len': P('number', '最大字符数', { default: 20000 }),
+      out: P('string', '写入文件'),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      const requestId = pos[0] ?? str(opts.requestId);
+      if (!requestId) fail('E_PARAM', '缺少 requestId', '先跑 net 拿 requestId');
+      const r = await cmd('net-body', {
+        ...tabArgs(opts), requestId, maxLen: num(opts['max-len'], 20000, 'max-len')
+      }, 45000);
+      if (opts.out) {
+        const f = String(opts.out);
+        if (r.base64) writeFileSync(f, Buffer.from(r.body, 'base64'));
+        else writeFileSync(f, r.body, 'utf8');
+        r.file = f;
+        r.fileBytes = Buffer.byteLength(r.base64 ? Buffer.from(r.body, 'base64') : r.body);
+      }
+      return r;
+    }
+  },
+
+  'net-intercept': {
+    summary: '开启/关闭请求拦截（开启后可 mock/改包/延迟/中断）',
+    params: { on: P('bool', '默认 true；--on false 关闭'), tab: P('number', '标签页 id') },
+    run: async (pos, opts) => cmd('net-intercept', { ...tabArgs(opts), on: opts.on !== 'false' }, 45000)
+  },
+
+  'net-rule': {
+    summary: '拦截规则：mock（返回假响应）/ abort（中断）/ delay（延迟）/ header（加头）',
+    params: {
+      add: P('string', '规则 JSON，如 \'{"pattern":"/api/user","action":"mock","status":200,"body":"{}"}\''),
+      clear: P('flag', '清空全部规则')
+    },
+    example: 'net-rule --add \'{"pattern":"/api/user","action":"mock","status":200,"body":"{\\"ok\\":true}"}\'',
+    run: async (pos, opts) => cmd('net-rule', { add: str(opts.add) ?? null, clear: opts.clear === true }, 30000)
+  },
+
+  'net-har': {
+    summary: '把当前网络缓冲导出成 HAR 1.2（默认包含响应正文）',
+    params: {
+      out: P('string', '写入文件'),
+      limit: P('number', '最多导出多少条', { default: 200 }),
+      'no-bodies': P('flag', '不读取响应正文（更快）'),
+      'max-body': P('number', '单条正文最大字符数', { default: 20000 }),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      const r = await cmd('net-har', {
+        ...tabArgs(opts),
+        limit: num(opts.limit, 200, 'limit'),
+        bodies: opts['no-bodies'] !== true,
+        maxBody: num(opts['max-body'], 20000, 'max-body')
+      }, 90000);
+      const meta = { entries: r.log.entries.length, bodiesIncluded: r.bodiesIncluded, bodiesFailed: r.bodiesFailed };
+      if (opts.out) { writeFileSync(String(opts.out), JSON.stringify(r, null, 2), 'utf8'); return { ...meta, file: String(opts.out) }; }
+      return { ...meta, log: r.log };
+    }
+  },
+
+  perf: {
+    summary: '性能指标 + Web Vitals（TTFB/FCP/LCP + CLS/INP/LongTask/LCP 元素归属 + 资源分布）',
+    params: { all: P('flag', '返回全部 CDP 指标'), tab: P('number', '标签页 id') },
+    run: async (pos, opts) => cmd('perf', { ...tabArgs(opts), all: opts.all === true }, 45000)
+  },
+
+  emulate: {
+    summary: '环境模拟：设备尺寸/网络档/CPU 降速/暗色与减弱动效/时区/语言/地理；--reset 一次还原',
+    params: {
+      device: P('string', 'iphone|pixel|ipad|desktop 或 375x812'),
+      network: P('string', 'offline|slow3g|fast3g|4g'),
+      cpu: P('number', 'CPU 降速倍数（1=不降速）'),
+      media: P('string', 'dark|light|reduced-motion，逗号组合'),
+      timezone: P('string', '如 Asia/Tokyo'),
+      locale: P('string', '如 ja-JP'),
+      geo: P('string', '"纬度,经度"'),
+      reset: P('flag', '清除全部模拟'),
+      tab: P('number', '标签页 id')
+    },
+    example: 'emulate --device iphone --network slow3g --cpu 4 --media dark',
+    run: async (pos, opts) => cmd('emulate', {
+      ...tabArgs(opts),
+      device: str(opts.device) ?? null,
+      network: str(opts.network) ?? null,
+      cpu: opts.cpu == null ? null : num(opts.cpu, 1, 'cpu'),
+      media: str(opts.media) ?? null,
+      timezone: str(opts.timezone) ?? null,
+      locale: str(opts.locale) ?? null,
+      geo: str(opts.geo) ?? null,
+      reset: opts.reset === true
+    }, 20000)
+  },
+
+  coverage: {
+    summary: 'JS/CSS 覆盖率：start 后照常操作，再跑一次（或 --mode stop）拿未使用代码占比',
+    params: {
+      mode: P('string', 'start|stop|report', { default: 'report' }),
+      top: P('number', '各返回多少个最没被用到的文件/表', { default: 8 }),
+      tab: P('number', '标签页 id')
+    },
+    example: 'coverage --mode start   …操作…   coverage --mode stop',
+    run: async (pos, opts) => cmd('coverage', {
+      ...tabArgs(opts),
+      mode: String(opts.mode ?? 'report'),
+      top: num(opts.top, 8, 'top')
+    }, 60000)
+  },
+
+  dialog: {
+    summary: 'JS 弹窗策略与记录；默认 manual 只记录不处理（会阻塞页面）',
+    params: {
+      policy: P('string', 'accept|dismiss|manual'),
+      clear: P('flag', '清空记录'),
+      limit: P('number', '返回条数', { default: 20 }),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => cmd('dialog', {
+      ...tabArgs(opts),
+      policy: str(opts.policy) ?? null,
+      clear: opts.clear === true,
+      limit: num(opts.limit, 20, 'limit')
+    }, 45000)
+  },
+
+  upload: {
+    summary: '给文件输入框设置文件（绕过系统选择框）',
+    params: {
+      ref: P('number', '文件输入框的 SoM 编号'),
+      selector: P('string', '文件输入框 CSS'),
+      file: P('string', '单个文件路径'),
+      files: P('string', '多个文件，逗号分隔'),
+      tab: P('number', '标签页 id')
+    },
+    example: 'upload --selector "#file" --file D:\\a.pdf',
+    run: async (pos, opts) => {
+      const files = opts.files ? String(opts.files).split(',').map((s) => s.trim()).filter(Boolean)
+        : (opts.file ? [String(opts.file)] : []);
+      if (!files.length) fail('E_PARAM', '缺少文件', '用法: upload --ref N --file <路径>');
+      return cmd('upload', {
+        ...tabArgs(opts),
+        ref: positiveInt(opts.ref, 'ref'),
+        selector: str(opts.selector) ?? null,
+        files
+      }, 90000);
+    }
+  },
+
+  wait: {
+    summary: '等待条件成立：元素出现/消失、URL 变化、或页面出现某段文字',
+    params: {
+      selector: P('string', '等待的 CSS 选择器'),
+      detach: P('flag', '改为等待元素消失'),
+      url: P('string', '等待 URL 包含该片段'),
+      text: P('string', '等待页面出现这段文字'),
+      timeout: P('number', '超时 ms', { default: 15000 }),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      const timeout = num(opts.timeout, 15000, 'timeout');
+      const r = await cmd('wait', {
+        ...tabArgs(opts),
+        selector: str(opts.selector) ?? null,
+        mode: opts.detach === true ? 'detach' : 'attach',
+        urlPart: str(opts.url) ?? null,
+        text: str(opts.text) ?? null,
+        timeoutMs: timeout
+      }, timeout + 8000);
+      if (!r.ok) fail('E_TIMEOUT', `等待超时（${r.elapsedMs}ms）：${opts.selector ?? opts.url ?? opts.text}`, '加大 --timeout，或先 snapshot 确认选择器');
+      return r;
+    }
+  },
+
+  'wait-idle': {
+    summary: '等网络安静（在途请求归零并持续一段时间），比 wait-load 更适合 SPA',
+    params: {
+      timeout: P('number', '超时 ms', { default: 15000 }),
+      'idle-ms': P('number', '需要持续安静多久', { default: 600 }),
+      tab: P('number', '标签页 id')
+    },
+    example: 'wait-idle --timeout 20000',
+    run: async (pos, opts) => cmd('wait-idle', {
+      ...tabArgs(opts),
+      timeoutMs: num(opts.timeout, 15000, 'timeout'),
+      idleMs: num(opts['idle-ms'], 600, 'idle-ms')
+    }, num(opts.timeout, 15000, 'timeout') + 8000)
+  },
+
+  session: {
+    summary: '隔离会话：把 agent 的标签页收进独立 tab group，任务结束一键清理',
+    params: {
+      mode: P('string', 'open|list|close', { default: 'list' }),
+      url: P('string', 'mode=open 时打开的地址'),
+      wait: P('bool', '是否等加载完成，默认 true'),
+      tab: P('number', '保留参数，兼容统一解析')
+    },
+    example: 'session --mode open --url https://example.com   →  session --mode close',
+    run: async (pos, opts) => {
+      const mode = String(opts.mode ?? (pos[0] || 'list'));
+      return cmd('session', {
+        mode,
+        url: str(opts.url) ?? null,
+        active: opts['tab-bg'] !== true,
+        waitLoad: opts.wait !== 'false'
+      }, 90000);
+    }
+  },
+
+  cdp: {
+    summary: 'CDP 直通（仅页面级域），用于排障或调用未封装的能力',
+    params: {
+      method: P('string', '如 Page.captureScreenshot', { required: true }),
+      params: P('string', 'JSON 字符串参数'),
+      'max-len': P('number', '返回结果最大字符数', { default: 4000 }),
+      tab: P('number', '标签页 id')
+    },
+    run: async (pos, opts) => {
+      const method = pos[0] ?? str(opts.method);
+      if (!method) fail('E_PARAM', '缺少 method', '例: cdp Runtime.evaluate --params \'{"expression":"1+1"}\'');
+      let params = {};
+      if (opts.params) {
+        try { params = JSON.parse(String(opts.params)); }
+        catch { fail('E_PARAM', '--params 不是合法 JSON', '用单引号包裹 JSON，或写成文件后传入'); }
+      }
+      return cmd('cdp', {
+        ...tabArgs(opts), method, params, maxLen: num(opts['max-len'], 4000, 'max-len')
+      }, 60000);
+    }
+  },
+
+  replay: {
+    summary: '回放录制过的命令序列：一条命令跑完整流程，省 token 也省推理',
+    params: {
+      file: P('string', '录制文件（JSONL）', { required: true }),
+      tab: P('number', '把所有步骤重定向到该标签页'),
+      'stop-on-error': P('bool', '遇错即停，默认 true'),
+      dry: P('flag', '只列出将要执行的步骤，不真的跑')
+    },
+    example: 'ARK_WEB_RECORD=flow.jsonl node client/browser-client.js ...（正常跑一遍）；之后 replay flow.jsonl --tab 12',
+    run: async (pos, opts) => {
+      const file = pos[0] ?? str(opts.file);
+      if (!file) fail('E_PARAM', 'replay 需要录制文件', '先设置 ARK_WEB_RECORD=flow.jsonl 跑一遍流程');
+      if (!existsSync(file)) fail('E_NOT_FOUND', `录制文件不存在：${file}`, '确认路径；录制开关是环境变量 ARK_WEB_RECORD');
+      const lines = readFileSync(file, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean);
+      if (!lines.length) fail('E_PARAM', '录制文件是空的', '确认 ARK_WEB_RECORD 指向的是本次录制的文件');
+      const steps = [];
+      for (const line of lines) {
+        let rec;
+        try { rec = JSON.parse(line); } catch { continue; }
+        if (!Array.isArray(rec.argv) || !rec.argv.length) continue;
+        steps.push([...rec.argv]);
+      }
+      const out = [];
+      for (const argv of steps) {
+        // 指定了 --tab 就意味着「在这张标签上重跑这段流程」，
+        // 因此录制里的 open 步骤应当跳过，否则会另开一张新标签，跑到别处去。
+        if (opts.tab !== undefined && opts.tab !== true && argv[0] === 'open') {
+          out.push({ step: argv.join(' '), skipped: 'open（已用 --tab 指定目标标签）' });
+          continue;
+        }
+        if (opts.tab !== undefined && opts.tab !== true) {
+          const i = argv.indexOf('--tab');
+          if (i >= 0) argv.splice(i, 2);
+          argv.push('--tab', String(opts.tab));
+        }
+        if (opts.dry === true) { out.push({ step: argv.join(' '), dry: true }); continue; }
+        const name = argv[0];
+        try {
+          const { positional, opts: o } = parseArgs(argv.slice(1));
+          await dispatch(name, { positional, opts: o }, { nested: true });
+          out.push({ step: argv.join(' '), ok: true });
+        } catch (e) {
+          out.push({
+            step: argv.join(' '), ok: false,
+            error: { code: e.code ?? 'E_UNKNOWN', message: e.message, ...(e.hint ? { hint: e.hint } : {}) }
+          });
+          if (opts['stop-on-error'] !== 'false') break;
+        }
+      }
+      return { steps: out.length, results: out };
+    }
+  },
+
+  chain: {
+    summary: '串联多条子命令；支持 {{steps.N.字段}} 取上一步结果与 --on-error continue，顶层 --tab 透传给每一步',
+    params: {
+      steps: P('string[]', '每条一个子命令字符串'),
+      'on-error': P('string', 'stop（默认）| continue', { default: 'stop' })
+    },
+    example: 'chain "find --text 登录" "click --ref {{steps.0.items.0.ref}}" "wait --text 欢迎" --tab 12',
+    run: async (pos, opts) => {
+      const results = [];
+      const onError = String(opts['on-error'] ?? 'stop');
+      for (const rawStep of pos) {
+        const ctx = { steps: results.map((r) => r.data), last: results.length ? results.at(-1).data : null };
+        const step = interpolate(rawStep, ctx);
+        const parts = tokenize(step);
+        if (!parts.length) continue;
+        const t0 = Date.now();
+        try {
+          const { positional: stepPos, opts: stepOpts } = parseArgs(parts.slice(1));
+          // 顶层 --tab 透传：子命令自己没写 --tab 时继承，避免「chain 里 tab 被静默丢弃」
+          if (stepOpts.tab === undefined && opts.tab !== undefined) stepOpts.tab = opts.tab;
+          const out = await dispatch(parts[0], { positional: stepPos, opts: stepOpts }, { nested: true });
+          results.push({ step, ok: true, ms: Date.now() - t0, data: out });
+        } catch (e) {
+          results.push({
+            step, ok: false, ms: Date.now() - t0,
+            error: {
+              code: e.code ?? 'E_UNKNOWN', message: e.message,
+              ...(e.hint ? { hint: e.hint } : {}),
+              ...(e.retryable !== undefined ? { retryable: e.retryable } : {})
+            }
+          });
+          if (onError !== 'continue') {
+            // 中止但保留已完成的步骤，调用方才知道停在哪、已经发生了什么
+            e.data = { steps: results.length, results };
+            throw e;
+          }
+        }
+      }
+      return { steps: results.length, results };
+    }
+  },
+
+  fanout: {
+    summary: '在多个浏览器上并行执行同一条命令；默认全部浏览器',
+    params: {
+      cmd: P('string', '要执行的子命令（一条完整命令字符串）', { required: true }),
+      ext: P('string', 'all | extId | 浏览器名（可逗号分隔），省略=全部'),
+      timeout: P('number', '每个浏览器的超时 ms', { default: 180000 })
+    },
+    example: 'fanout "snapshot --limit 20 --no-shot" --ext chrome,edge',
+    run: async (pos, opts) => {
+      const raw = pos.join(' ').trim();
+      if (!raw) fail('E_PARAM', 'fanout 需要一条子命令', '例：fanout "snapshot --limit 20 --no-shot"');
+      const tokens = tokenize(raw);
+      if (!tokens.length) fail('E_PARAM', 'fanout 子命令为空', '例：fanout "tabs"');
+      if (tokens[0] === 'fanout') fail('E_PARAM', 'fanout 不能嵌套 fanout', '直接写目标子命令');
+      if (tokens.includes('--ext') || tokens.includes('--conn')) fail('E_PARAM', 'fanout 的子命令不要再写 --ext/--conn', '把选择条件放在 fanout 外层');
+      const exts = await resolveExts(opts.ext || opts.browser);
+      const timeoutMs = Math.max(5000, num(opts.timeout, 180000, 'timeout'));
+      const results = await Promise.all(exts.map(async (e) => {
+        const r = await runSelfJson([...tokens, '--conn', e.conn], timeoutMs);
+        return {
+          extId: e.id, browser: e.browser,
+          ok: !!r.ok, ...(r.ok ? { data: r.data } : { error: r.error })
+        };
+      }));
+      return { cmd: tokens.join(' '), count: results.length, browsers: results };
+    }
+  },
+
+  help: { summary: '帮助', params: {}, run: async () => ({ help: HELP }) }
+};
+
+// ── 输出层 ─────────────────────────────────────────────────────────────────
+const JSON_MODE = () => process.env.ARK_WEB_JSON === '1' || global.__ARK_JSON__ === true;
+
+const HUMAN = {
+  status: (d) => `connected: ${d.connected}\nextensions: ${d.extensions.length}` +
+    (d.whitelisted ? `\nwhitelisted: ${d.whitelisted}` : '\nwhitelisted: 0（未启用白名单）') + '\n' +
+    d.extensions.map((e) => `  - ${e.browser || '?'} · ${e.name} v${e.version}${e.id ? '  id=' + e.id : ''}${e.conn ? '  conn=' + e.conn : ''}`).join('\n'),
+
+  tabs: (d) => `共 ${d.count} 个标签页` + (d.browsers ? `（${d.browsers.length} 个浏览器）` : '') + '\n' + d.tabs.map((t) =>
+    `  ${String(t.id).padStart(6)}  ${t.active ? '●' : ' '} ${String(t.browser || '?').padEnd(8)} ${String(t.title ?? '').slice(0, 40)}  ${t.url ?? ''}`).join('\n'),
+
+  open: (d) => `tab=${d.id}  ${d.title ?? ''}  ${d.url ?? ''}${d.capturing ? '  [网络捕获中]' : ''}`,
+  close: (d) => `已关闭 tab=${d.closed}`,
+  activate: (d) => `已切到 tab=${d.id}  ${d.url ?? ''}`,
+  info: (d) => `tab=${d.id}  ${d.status}\n${d.title}\n${d.url}\n视口 ${d.viewport?.w}×${d.viewport?.h} @${d.viewport?.dpr}${d.viewport?.hidden ? '（后台）' : ''}`,
+
+  snapshot: (d) => {
+    const head = [
+      `URL  ${d.url}`, `标题 ${d.title}`,
+      `元素 ${d.count} 个${d.truncated ? `（返回前 ${d.returned}）` : ''}${d.frames ? ` · ${d.frames.length} 个框架` : ''}`
+    ];
+    if (d.diff && d.diff.mode === 'delta') {
+      head.push(`变化 +${d.diff.counts.added} -${d.diff.counts.removed} ~${d.diff.counts.changed}`);
+    }
+    const lines = d.elements.map((e) => {
+      const ctx = e.context ? `  «${e.context}»` : '';
+      const val = e.value ? `  = ${String(e.value).slice(0, 30)}` : '';
+      const flag = e.disabled ? ' [禁用]' : (!e.inView ? ' [视口外]' : '');
+      return `  [${String(e.ref).padStart(3)}] ${(e.role || e.tag).padEnd(10)} ${String(e.text || '').slice(0, 44)}${val}${ctx}${flag}`;
+    });
+    if (d.shot) lines.push(`截图 ${d.shot.file} (${d.shot.format}, ${d.shot.bytes} B)${d.shot.clip ? '  元素级' : ''}`);
+    return head.concat(lines).join('\n');
+  },
+
+  find: (d) => `query="${d.query}"  共 ${d.total} 个匹配，返回 ${d.items.length} 个\n` +
+    d.items.map((x) => {
+      const state = x.clickable ? '✓可点' : '✗' + (x.coveredBy ? `被 ${x.coveredBy} 遮挡` : !x.enabled ? '禁用' : '不可见');
+      return `  [${String(x.ref).padStart(3)}] ${(x.tag + '/' + x.role).padEnd(18)} ${state.padEnd(24)} ${String(x.score).padStart(4)}  ${String(x.text || '').slice(0, 40)}`;
+    }).join('\n'),
+
+  click: (d) => `已点击 ${d.tag}  via=${d.via}  等待 ${d.waitedMs}ms  ` +
+    (d.navigated ? `跳转到 ${d.urlAfter}` : d.mutated ? 'DOM 已变化' : '无变化（no-effect）') +
+    (d.openedTab ? `\n新标签 tab=${d.openedTab.id} ${d.openedTab.url}` : '') +
+    (d.ref && d.via ? '' : ''),
+
+  fill: (d) => d.chars == null
+    ? `已处理 ${d.tag || '元素'}  via=${d.via}${d.mutated ? '  DOM 已变化' : d.settled === false ? '  无变化' : ''}`
+    : `已填写 ${d.chars} 字符  via=${d.via}  校验=${d.verified ? '通过' : '未通过'}${d.masked ? '（密码值已脱敏）' : ''}\n当前值：${d.value}`,
+  hover: (d) => `已悬停 via=${d.via}  :hover 命中 ${d.hoverActive ? '是' : '否'}${d.hoverActive ? '' : '（可能是纯 CSS 效果或元素无 hover 态）'}`,
+  press: (d) => `已发送 ${d.key}${d.modifiers ? ` (modifiers=${d.modifiers})` : ''}` + (d.navigated ? `  跳转到 ${d.urlAfter}` : d.mutated ? '  DOM 已变化' : ''),
+
+  select: (d) => d.mode === 'native'
+    ? `已选择 ${d.picked.join(',')}（原生 select）`
+    : `已选择「${d.picked.join(',')}」（自定义下拉）`,
+
+  scroll: (d) => `滚动 ${d.before?.y} → ${d.after?.y}${d.max != null ? `（可滚动上限 ${d.max}）` : ''}`,
+
+  text: (d) => `URL  ${d.url}\n标题 ${d.title}\n字数 ${d.chars}${d.truncated ? '（已截断）' : ''}\n---\n${d.text}`,
+
+  extract: (d) => `匹配 ${d.count} 行，返回 ${d.returned} 行${d.truncated ? '（已截断）' : ''}\n` +
+    d.rows.slice(0, 10).map((r, i) => `  ${i + 1}. ` + Object.entries(r).filter(([k]) => !k.startsWith('_'))
+      .map(([k, v]) => `${k}=${String(v).slice(0, 36)}`).join(' | ')).join('\n') +
+    (d.rows.length > 10 ? `\n  … 另有 ${d.rows.length - 10} 行` : ''),
+
+  table: (d) => `表头: ${d.header.join(' | ')}\n共 ${d.totalRows} 行，返回 ${d.returned} 行${d.truncated ? '（已截断）' : ''}\n` +
+    d.rows.slice(0, 10).map((r) => '  ' + Object.values(r).join(' | ')).join('\n'),
+
+  state: (d) => `内嵌数据源 ${d.found} 个${d.via ? `（${d.via}）` : ''}\n` + (d.sources || []).map((s) => `  ${String(s.kind).padEnd(24)} ${String(s.bytes).padStart(7)} B${s.truncated ? ' (截断)' : ''}`).join('\n') +
+    (Object.keys(d.meta || {}).length ? `\nmeta: ${Object.keys(d.meta).join(', ')}` : ''),
+
+  assert: (d) => `✓ 断言通过（${d.kind}）  实际 ${JSON.stringify(d.actual)}`,
+
+  console: (d) => `缓冲 ${d.total} 条，返回 ${d.returned} 条\n` + d.items.map((it) =>
+    `  ${new Date(it.at).toLocaleTimeString('zh-CN', { hour12: false })}  [${it.level}]  ${it.text}`).join('\n'),
+
+  net: (d) => `共 ${d.total} 条，返回 ${d.returned} 条${d.intercepting ? '  [拦截中]' : ''}\n` + d.items.map((e) => {
+    const st = e.failed ? 'ERR' : (e.status ?? '-');
+    const sz = e.size > 1024 ? `${(e.size / 1024).toFixed(1)}K` : `${e.size ?? 0}B`;
+    return `  ${String(st).padEnd(5)} ${String(e.method).padEnd(4)} ${String(e.type).padEnd(9)} ${sz.padStart(8)} ${String(e.ms ?? '-').padStart(6)}ms  ${e.url}`;
+  }).join('\n'),
+
+  'net-body': (d) => d.file
+    ? `已写入 ${d.file}（${d.fileBytes ?? d.length} 字节）`
+    : d.base64 ? `(base64，长度 ${d.length}；加 --out 可落盘)`
+      : d.body,
+  'net-intercept': (d) => d.intercepting ? '拦截已开启（记得用完关闭）' : '拦截已关闭',
+  'net-rule': (d) => `规则 ${d.count} 条\n` + d.rules.map((r, i) => `  ${i + 1}. ${r.action}  ${r.pattern || '*'}${r.status ? ' → ' + r.status : ''}`).join('\n'),
+  'net-har': (d) => `HAR 条目 ${d.entries} 条（正文 ${d.bodiesIncluded ?? 0}，失败 ${d.bodiesFailed ?? 0}）${d.file ? ` → ${d.file}` : ''}`,
+
+  perf: (d) => {
+    const m = d.metrics || {};
+    const v = d.vitals || {};
+    const kb = (x) => (x == null ? '-' : `${(x / 1024).toFixed(1)} MB`);
+    const ms = (x) => (x == null ? '-' : `${Math.round(x)} ms`);
+    return [
+      `节点数 ${m.Nodes ?? '-'}   布局 ${m.LayoutCount ?? '-'} 次   重算样式 ${m.RecalcStyleCount ?? '-'} 次`,
+      `JS 堆 ${kb(m.JSHeapUsedSize)} / ${kb(m.JSHeapTotalSize)}   脚本 ${ms((m.ScriptDuration || 0) * 1000)}`,
+      `TTFB ${ms(v.ttfb)}   FCP ${ms(v.fcp)}   LCP ${ms(v.lcp)}   加载 ${ms(v.load)}`,
+      `资源 ${v.resources?.total ?? '-'} 个 / ${kb(v.resources?.bytes)}`
+    ].join('\n');
+  },
+
+  emulate: (d) => d.reset
+    ? '已还原全部模拟'
+    : '已应用：' + Object.entries(d.applied || {}).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  '),
+
+  coverage: (d) => d.started
+    ? '已开始采集（要在导航前 start 才能覆盖整页；已加载页面可先 eval "location.reload()"）'
+    : [
+      `JS  使用率 ${d.js.pct ?? '-'}%（${d.js.usedChars}/${d.js.totalChars} 字符，已跳过 ${d.js.skippedExtensionScripts || 0} 个扩展脚本）`,
+      ...d.js.files.map((f) => `  ${String(f.pct).padStart(3)}%  未用 ${f.size - f.used} 字  ${f.url}`),
+      `CSS 使用率 ${d.css.pct ?? '-'}%（${d.css.usedChars}/${d.css.totalChars} 字符）`
+    ].join('\n'),
+
+  dialog: (d) => `策略 ${d.policy}  记录 ${d.total} 条\n` + d.items.map((x) =>
+    `  [${new Date(x.at).toLocaleTimeString()}] ${x.type}  ${x.message}  -> ${x.action}`).join('\n') + (d.note ? `\n${d.note}` : ''),
+
+  upload: (d) => `已设置 ${d.requested} 个文件` + (d.input ? `\n输入框现有 ${d.input.count} 个: ${d.input.files.map((f) => f.name).join(', ')}` : '\n警告: 读不到 input.files'),
+
+  wait: (d) => `✓ 命中（${d.elapsedMs}ms）${d.selector ? '  ' + d.selector : d.url ? '  ' + d.url : ''}`,
+  'wait-idle': (d) => d.idle ? `✓ 网络安静（${d.waitedMs}ms）` : `✗ 仍有余量（在途 ${d.inflight}）`,
+
+  session: (d) => d.closed !== undefined
+    ? `已清理 ${d.closed} 个标签`
+    : d.id != null
+      ? `已加入会话 tab=${d.id}  ${d.title || ''}  ${d.url || ''}`
+      : `会话内 ${d.count ?? 0} 个标签` + (d.tabs || []).map((t) => `\n  ${t.id}  ${t.url}`).join(''),
+
+  attr: (d) => JSON.stringify(d, null, 2),
+  shot: (d) => `已保存 ${d.file}（${d.bytes} B）` + (d.clip ? `  元素 ${Math.round(d.clip.width)}×${Math.round(d.clip.height)}` : '') + (d.focused ? '  [已聚焦]' : '') +
+    (d.uniform ? '  [纯色帧]' : '') +
+    (d.diff ? (d.diff.firstRun ? '\n差异：' + d.diff.note : `\n与上次相比：变化 ${d.diff.changedPct}%` + (d.diff.bbox ? `  区域 x${d.diff.bbox.x} y${d.diff.bbox.y} ${d.diff.bbox.w}×${d.diff.bbox.h}` : '')) : ''),
+  eval: (d) => (d.value && typeof d.value === 'object' ? JSON.stringify(d.value, null, 2) : String(d.value)),
+  cdp: (d) => typeof d.result === 'object' ? JSON.stringify(d.result, null, 2) : String(d.result),
+
+  describe: (d) => d.commands
+    ? `共 ${d.commands.length} 个命令\n` + d.commands.map((c) => `  ${c.name.padEnd(15)} ${c.summary}`).join('\n') + `\n\n用 describe <cmd> 看单个命令的参数。`
+    : `${d.name}: ${d.summary}\n参数:\n` + Object.entries(d.params).map(([k, v]) =>
+      `  --${k.padEnd(14)} ${String(v.type).padEnd(9)} ${v.desc}${v.required ? ' [必填]' : v.default !== undefined ? ` [默认 ${v.default}]` : ''}`).join('\n'),
+
+  fanout: (d) => `并行 ${d.count} 个浏览器：${d.cmd}\n` + d.browsers.map((b) =>
+    `  ${b.ok ? '✓' : '✗'} ${String(b.browser || '?').padEnd(8)} ${b.extId}${b.ok ? '' : '  → ' + (b.error?.code || '') + ' ' + (b.error?.message || '')}`).join('\n'),
+  chain: (d) => d.results.map((r, i) => `  ${i + 1}. ✓ ${r.step}`).join('\n'),
+  replay: (d) => `执行 ${d.steps} 步\n` + d.results.map((r, i) => {
+    const err = r.error && typeof r.error === 'object' ? `${r.error.code || ''} ${r.error.message || ''}`.trim() : r.error;
+    return `  ${i + 1}. ${r.skipped ? '↷' : (r.ok || r.dry ? '✓' : '✗')} ${r.step}${err ? '  → ' + err : ''}${r.skipped ? '  → ' + r.skipped : ''}`;
+  }).join('\n'),
+
+  help: (d) => d.help
+};
+
+// ── 分发 ───────────────────────────────────────────────────────────────────
+async function dispatch(command, { positional, opts }, ctx = {}) {
+  const spec = COMMANDS[command];
+  if (!spec) fail('E_UNKNOWN_CMD', `没有命令 ${command}`, '跑 describe 看全部命令');
+  if (!ctx.nested && opts.json === true) global.__ARK_JSON__ = true;
+  const data = await spec.run(positional, opts);
+  if (!ctx.nested) {
+    if (JSON_MODE()) {
+      const env = { ok: true, cmd: command, schemaVersion: 2, data };
+      if (lastElapsedMs != null) env.elapsedMs = lastElapsedMs;
+      process.stdout.write(JSON.stringify(env) + '\n');
+    }
+    else {
+      const fmt = HUMAN[command];
+      process.stdout.write((fmt ? fmt(data) : JSON.stringify(data, null, 2)) + '\n');
+    }
+  }
+  return data;
+}
+
+const HELP = `Ark Web 浏览器 CLI v${VERSION}（加 --json 输出 envelope；describe 查看能力）
+
+  连接与标签（多浏览器）
+    status                              连接状态（浏览器 / 扩展 ID / 白名单）
+    tabs                                聚合所有浏览器的标签（带 browser/extId）
+    info | open <url> | close | activate 配合 --ext <id|chrome|edge> 使用
+    session --mode open|list|close      隔离会话（可一键清理 agent 的标签）
+    fanout "snapshot --limit 20"        在全部浏览器并行执行同一条命令
+
+  观察（都跨 iframe 与 shadow DOM）
+    snapshot [--limit 40] [--diff] [--in-view] [--shot]
+                                        语义快照；默认只回结构（快），--shot 才截图并把编号烧进图里
+    find --text "提交" [--role button]   语义定位（返回可点性、遮挡者、上下文）
+    attr --ref N | --selector "…"       元素全量属性与语义上下文
+    text [--max-len N] [--out f.md]     正文（Markdown 风格）
+    state [--max-len N]                 内嵌数据（JSON-LD / __NEXT_DATA__ / __INITIAL_STATE__）
+    assert --selector "#x" --text "…"   断言：text|value|attr|count|visible
+    eval "<js>"                         在页面求值（等待 Promise）
+
+  动作（全部走 CDP 真实输入）
+    click --ref N | --selector "…"      点击：遮挡预检 + 效果确认 + 新标签追踪
+    fill  --ref N --text "…" [--type]   填写：真实 insertText/逐字符，填完回读校验
+    hover --ref N                       真实悬停（驱动 CSS :hover）
+    press --key "Ctrl+Enter"            真实按键（含 Tab/Escape 默认行为）
+    select --ref N --values "a,b"       原生 select 直选 / 自定义下拉点开选
+    scroll --dy 600 | shot <file> [--selector "…"] | upload --file …
+    dialog --policy accept|dismiss|manual
+
+  数据采集
+    extract --selector "…" --fields "…" 单页抽取
+      [--paginate --next "a.next"]      翻页采集（跨页去重、自动判停）
+      [--scroll 6 --step 700]           无限滚动/虚拟列表采集
+    table [--selector table] [--out f.csv]
+    net [--errors] [--filter kw]        网络清单（含 postData）
+    net-body <id> | net-har --out h.har
+    net-intercept [--on false]          请求拦截开关
+    net-rule --add '{...}'              mock|abort|delay|header 规则
+    perf                                节点/堆 + TTFB/FCP/LCP/CLS/INP/LongTask/资源分布
+    console [--level error] [--clear]
+    coverage --mode start|stop          JS/CSS 覆盖率（导航前 start 才能覆盖整页）
+    emulate --device iphone --network slow3g --cpu 4 --media dark
+      [--timezone Asia/Tokyo] [--locale ja-JP] [--geo 35.68,139.76] [--reset]
+
+  组合与复用
+    wait --selector "…" | --text "…" | --url "…" | --detach
+                                        事件驱动（MutationObserver），不再轮询
+    wait-idle                           等网络安静（SPA 更可靠）
+    chain "cmd1" "cmd2" --tab N         串联；支持 {{steps.0.items.0.ref}} 取值与 --on-error continue
+    replay flow.jsonl --tab N           回放录制流程（ARK_WEB_RECORD 录制）
+    cdp <method> --params '{...}'       CDP 直通
+
+多浏览器：tabs 默认聚合；任意命令加 --ext <extId|chrome|edge>、--browser <名字> 或 --conn <连接键> 指定目标；
+         fanout "<命令>" 在所有浏览器并行执行。
+环境变量：ARK_WEB_BASE / ARK_WEB_TOKEN / ARK_WEB_JSON=1 / ARK_WEB_RECORD=<文件>
+`;
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const command = argv[0] ?? 'help';
+  if (command === '-h' || command === '--help') {
+    process.stdout.write(HELP);
+    return;
+  }
+  const { positional, opts } = parseArgs(argv.slice(1));
+  // 录制：设置 ARK_WEB_RECORD=flow.jsonl 后，每条命令都会追加进去，供 replay 复用
+  const rec = process.env.ARK_WEB_RECORD;
+  if (rec && command !== 'replay') {
+    try { appendFileSync(rec, JSON.stringify({ argv, at: Date.now() }) + '\n'); } catch { /* 忽略录制失败 */ }
+  }
+  try {
+    if (opts.conn !== undefined && opts.conn !== true) {
+      global.__ARK_EXT_SEL__ = { conn: String(opts.conn) };
+    }
+    // --ext 支持 extId / 浏览器名 / 逗号列表；单个命令必须唯一
+    if (opts.ext !== undefined && opts.ext !== true && opts.ext !== 'all' && !['tabs', 'fanout'].includes(command)) {
+      const picked = await resolveExts(opts.ext);
+      if (picked.length !== 1) {
+        fail('E_AMBIGUOUS_EXT', `--ext ${opts.ext} 匹配到多个浏览器`, `用 --conn 精确指定：${picked.map((e) => `${e.browser}@${e.conn}`).join(', ')}`);
+      }
+      global.__ARK_EXT_SEL__ = { extId: picked[0].id, conn: picked[0].conn };
+    }
+    if (opts.ext === 'all') global.__ARK_EXT__ = 'all';
+    // --browser 既支持 top-level，也支持在没有任何 --ext 时自动解析
+    if (!opts.ext && opts.conn === undefined && opts.browser !== undefined && opts.browser !== true && !['tabs', 'fanout'].includes(command)) {
+      const byBrowser = await resolveExts(opts.browser);
+      if (byBrowser.length !== 1) {
+        fail('E_AMBIGUOUS_EXT', `--browser ${opts.browser} 匹配到多个扩展`, `用 --ext 精确指定：${byBrowser.map((e) => e.id).join(', ')}`);
+      }
+      global.__ARK_EXT_SEL__ = { extId: byBrowser[0].id, conn: byBrowser[0].conn };
+    }
+    // 多浏览器下，只有 tabId 没有 --ext 时自动找唯一所属浏览器
+    if (opts.tab !== undefined && opts.tab !== true && !opts.ext && !opts.conn && !global.__ARK_EXT__ && !global.__ARK_EXT_SEL__) {
+      await resolveExtForTab(positiveInt(opts.tab, 'tab'));
+    }
+    await dispatch(command, { positional, opts });
+  } catch (e) {
+    const payload = {
+      ok: false,
+      cmd: command,
+      schemaVersion: 2,
+      error: {
+        code: e.code ?? 'E_UNKNOWN',
+        message: e.message,
+        ...(e.hint ? { hint: e.hint } : {}),
+        ...(e.retryable !== undefined ? { retryable: e.retryable } : {}),
+        ...(e.data ? { data: e.data } : {})
+      },
+      ...(lastElapsedMs != null ? { elapsedMs: lastElapsedMs } : {})
+    };
+    if (JSON_MODE()) process.stdout.write(JSON.stringify(payload) + '\n');
+    else process.stderr.write(`错误：${e.message}${e.hint ? `\n提示：${e.hint}` : ''}\n`);
+    process.exitCode = e.code === 'E_PARAM' ? 2 : 1;
+  }
+}
+
+main();
