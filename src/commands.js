@@ -14,7 +14,7 @@
 import * as frames from './frames.js';
 import * as refs from './refs.js';
 import * as input from './input.js';
-import { cdp, ensureAttached, enableDomains, forget, ensureFocusEmulation, rememberDeviceMetrics } from './cdp.js';
+import { cdp, ensureAttached, enableDomains, forget, ensureFocusEmulation, releaseFocusEmulation, rememberDeviceMetrics } from './cdp.js';
 import { captureShot, probeViewport, imageDiff } from './capture.js';
 import { STATE_AGENT } from './state-agent.js';
 
@@ -36,9 +36,24 @@ function rememberShot(key, b64) {
   }
 }
 import { watchNewTab } from './tabwatch.js';
+import { redactUrl, sanitizeObject, sanitizeText } from '../shared/redaction.mjs';
 import * as obs from './observers.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** HAR 正文脱敏：普通文本直接规则替换，base64 先按 UTF-8 解码再处理，无法解码则整体隐藏。 */
+function sanitizeHarBody(body, base64Encoded) {
+  const s = String(body ?? '');
+  if (!base64Encoded) return sanitizeText(s);
+  try {
+    const bytes = Uint8Array.from(atob(s), (ch) => ch.charCodeAt(0));
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    const clean = sanitizeText(text);
+    return btoa(unescape(encodeURIComponent(clean)));
+  } catch {
+    return '«redacted:base64»';
+  }
+}
 
 /** 按顶层分隔符切分，忽略 () [] {} 与引号内部的逗号（extract 的 :is(a,b) 等选择器） */
 function splitTopLevel(text, sep = ',') {
@@ -248,26 +263,30 @@ async function dispatchClick(tabId, t, opts = {}) {
     if (x >= 0 && y >= 0 && x <= vp.vw && y <= vp.vh) absolute = { x, y };
   }
   if (absolute) {
-    await ensureFocusEmulation(tabId);
-    await input.mouseMove(tabId, absolute.x, absolute.y);
-    // 悬停可能触发重排（悬浮菜单收起/展开、吸顶条下沉、动画位移），
-    // 按下之前必须重新量一次，否则点的是「上一帧的位置」。
     try {
-      const again = await frames.invoke(tabId, t.frameId, 'probe', [t.localRef, { scroll: false }]);
-      const againOff = again && !again.missing ? (again.offset || off) : null;
-      if (againOff) {
-        const vp = frames.mainViewport(tabId) || { vw: 1e9, vh: 1e9 };
-        const nx = again.point.x + againOff.x;
-        const ny = again.point.y + againOff.y;
-        const moved = Math.abs(nx - absolute.x) > 1 || Math.abs(ny - absolute.y) > 1;
-        if (moved && nx >= 0 && ny >= 0 && nx <= vp.vw && ny <= vp.vh) {
-          await input.mouseMove(tabId, nx, ny);
-          absolute = { x: nx, y: ny };
+      await ensureFocusEmulation(tabId);
+      await input.mouseMove(tabId, absolute.x, absolute.y);
+      // 悬停可能触发重排（悬浮菜单收起/展开、吸顶条下沉、动画位移），
+      // 按下之前必须重新量一次，否则点的是「上一帧的位置」。
+      try {
+        const again = await frames.invoke(tabId, t.frameId, 'probe', [t.localRef, { scroll: false }]);
+        const againOff = again && !again.missing ? (again.offset || off) : null;
+        if (againOff) {
+          const vp = frames.mainViewport(tabId) || { vw: 1e9, vh: 1e9 };
+          const nx = again.point.x + againOff.x;
+          const ny = again.point.y + againOff.y;
+          const moved = Math.abs(nx - absolute.x) > 1 || Math.abs(ny - absolute.y) > 1;
+          if (moved && nx >= 0 && ny >= 0 && nx <= vp.vw && ny <= vp.vh) {
+            await input.mouseMove(tabId, nx, ny);
+            absolute = { x: nx, y: ny };
+          }
         }
-      }
-    } catch { /* 量不到就按原坐标点 */ }
-    await input.mouseClick(tabId, absolute.x, absolute.y, { count: opts.count || 1, holdMs: opts.holdMs, skipMove: true });
-    return { via: 'cdp', point: absolute };
+      } catch { /* 量不到就按原坐标点 */ }
+      await input.mouseClick(tabId, absolute.x, absolute.y, { count: opts.count || 1, holdMs: opts.holdMs, skipMove: true });
+      return { via: 'cdp', point: absolute };
+    } finally {
+      await releaseFocusEmulation(tabId).catch(() => null);
+    }
   }
   const r = await frames.invoke(tabId, t.frameId, 'clickLocal', [t.localRef]);
   if (!r || r.ok === false) {
@@ -484,11 +503,14 @@ export async function dispatch(cmd, args) {
       watcher.cancel();
 
       if (effect.navigated) { refs.reset(tab.id); lastSnap.delete(tab.id); }
-      if (openedTab) { await setLastTab(openedTab.id); }
+      if (openedTab && args.follow === true) {
+        await setLastTab(openedTab.id);
+      }
 
       const out = Object.assign({ ref: t.ref, tag: info.tag, via: act.via }, effect);
       out.openedTabWaitMs = Date.now() - tWatch;
-      if (openedTab) out.openedTab = { id: openedTab.id, url: openedTab.url, tracked: true };
+      out.followed = !!openedTab && args.follow === true;
+      if (openedTab) out.openedTab = { id: openedTab.id, url: openedTab.url, tracked: args.follow === true };
       if (effect.settled === false) out.note = 'no-effect: DOM 与 URL 在 1.1 秒内均无变化，可能不是有效控件或被脚本拦截';
       return out;
     }
@@ -511,11 +533,15 @@ export async function dispatch(cmd, args) {
         : (t.info.offset || await frames.frameOffsetOf(tab.id, t.frameId).catch(() => null));
       const canReal = !!fillOffset;
       if (canReal) {
-        await ensureFocusEmulation(tab.id);
-        if (text === '') await input.pressKey(tab.id, 'Backspace');
-        else if (args.type === true) await input.typeChars(tab.id, text, Number(args.delay || 25));
-        else await input.insertText(tab.id, text);
-        via = args.type === true ? 'cdp-type' : 'cdp-insert';
+        try {
+          await ensureFocusEmulation(tab.id);
+          if (text === '') await input.pressKey(tab.id, 'Backspace');
+          else if (args.type === true) await input.typeChars(tab.id, text, Number(args.delay || 25));
+          else await input.insertText(tab.id, text);
+          via = args.type === true ? 'cdp-type' : 'cdp-insert';
+        } finally {
+          await releaseFocusEmulation(tab.id).catch(() => null);
+        }
       }
 
       const checkValue = async () => frames.invoke(tab.id, t.frameId, 'verifyValue', [t.localRef, text]);
@@ -557,8 +583,12 @@ export async function dispatch(cmd, args) {
         const x = info.point.x + off.x;
         const y = info.point.y + off.y;
         if (x >= 0 && y >= 0 && x <= vp.vw && y <= vp.vh) {
-          await ensureFocusEmulation(tab.id);
-          await input.mouseMove(tab.id, x, y);
+          try {
+            await ensureFocusEmulation(tab.id);
+            await input.mouseMove(tab.id, x, y);
+          } finally {
+            await releaseFocusEmulation(tab.id).catch(() => null);
+          }
           via = 'cdp';
         }
       }
@@ -578,8 +608,13 @@ export async function dispatch(cmd, args) {
       }
       const before = (await chrome.tabs.get(tab.id).catch(() => ({}))).url;
       await armObserver(tab.id, frameId);
-      await ensureFocusEmulation(tab.id);
-      const r = await input.pressKey(tab.id, args.key || 'Enter');
+      let r;
+      try {
+        await ensureFocusEmulation(tab.id);
+        r = await input.pressKey(tab.id, args.key || 'Enter');
+      } finally {
+        await releaseFocusEmulation(tab.id).catch(() => null);
+      }
       const effect = args.confirm === false ? {} : await confirmEffect(tab.id, frameId, before, { steps: [120, 300] });
       return Object.assign({ key: r.key, code: r.code, modifiers: r.modifiers }, effect);
     }
@@ -833,6 +868,7 @@ export async function dispatch(cmd, args) {
         try { rule = typeof args.add === 'string' ? JSON.parse(args.add) : args.add; }
         catch { fail('E_PARAM', '--add 需要合法 JSON', '例：--add \'{"pattern":"/api/user","action":"mock","status":200,"body":"{\\"ok\\":true}"}\''); }
         if (!rule.action) fail('E_PARAM', 'rule 需要 action', 'action: mock | abort | delay | header');
+        if (obs.fetchRules.length >= 100) fail('E_LIMIT', '拦截规则最多 100 条', '先执行 net-rule --clear 清空，再按需添加');
         obs.fetchRules.push(rule);
       }
       return { rules: obs.fetchRules, count: obs.fetchRules.length };
@@ -854,13 +890,14 @@ export async function dispatch(cmd, args) {
           try {
             const r = await cdp(tab.id, 'Network.getResponseBody', { requestId: String(e.requestId) });
             const body = String(r.body || '');
-            content.size = body.length;
+            const clean = sanitizeHarBody(body, r.base64Encoded === true);
+            content.size = clean.length;
             if (r.base64Encoded) content.encoding = 'base64';
-            if (body.length > maxBody) {
-              content.text = body.slice(0, maxBody);
-              content.comment = `truncated:${body.length}`;
+            if (clean.length > maxBody) {
+              content.text = clean.slice(0, maxBody);
+              content.comment = `truncated:${clean.length}`;
             } else {
-              content.text = body;
+              content.text = clean;
             }
             bodiesIncluded++;
           } catch { bodiesFailed++; }
@@ -868,8 +905,8 @@ export async function dispatch(cmd, args) {
         entries.push({
           startedDateTime: new Date(e.startedAt).toISOString(),
           time: e.ms || 0,
-          request: { method: e.method, url: e.url, headers: Object.entries(e.headers || {}).map(([name, value]) => ({ name, value: String(value) })), postData: e.postData ? { text: e.postData } : undefined },
-          response: { status: e.status || 0, statusText: '', headers: Object.entries(e.resHeaders || {}).map(([name, value]) => ({ name, value: String(value) })), content },
+          request: { method: e.method, url: redactUrl(e.url), headers: sanitizeObject(Object.entries(e.headers || {}).map(([name, value]) => ({ name, value: String(value) }))), postData: e.postData ? { text: sanitizeText(e.postData) } : undefined },
+          response: { status: e.status || 0, statusText: '', headers: sanitizeObject(Object.entries(e.resHeaders || {}).map(([name, value]) => ({ name, value: String(value) }))), content },
           cache: {}, timings: { wait: e.ms || 0 }
         });
       }

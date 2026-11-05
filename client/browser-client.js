@@ -12,16 +12,56 @@
  * 输出模式：默认人读文本；--json 或 ARK_WEB_JSON=1 输出 envelope（AI 用这个）。
  */
 
-import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync as rawWriteFileSync, existsSync, appendFileSync, chmodSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
+import { redactArgv } from '../shared/redaction.mjs';
 
-const VERSION = '5.1.0';
+const VERSION = '5.1.1';
 const BASE = process.env.ARK_WEB_BASE || 'http://127.0.0.1:9333';
 const TOKEN_FILE = path.join(os.homedir(), '.ark-web', 'token');
 const SELF = fileURLToPath(import.meta.url);
+const MAX_HTTP_BYTES = Number(process.env.ARK_WEB_MAX_HTTP || 64 * 1024 * 1024);
+const MAX_CHILD_OUTPUT = Number(process.env.ARK_WEB_MAX_CHILD_OUTPUT || 8 * 1024 * 1024);
+
+/** 分块读取并限制大小，避免超大页面/截图撑爆 CLI 内存。 */
+async function readLimitedText(res, limit = MAX_HTTP_BYTES) {
+  const declared = Number(res.headers.get('content-length') || 0);
+  if (Number.isFinite(declared) && declared > limit) {
+    const err = new Error(`桥接响应超过上限 ${limit} 字节`);
+    err.code = 'E_RESPONSE_TOO_LARGE';
+    err.hint = '缩小查询（如 --limit/--max-body），或调高 ARK_WEB_MAX_HTTP';
+    throw err;
+  }
+  if (!res.body) {
+    const text = await res.text();
+    if (Buffer.byteLength(text) > limit) throw new Error(`桥接响应超过上限 ${limit} 字节`);
+    return text;
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        const err = new Error(`桥接响应超过上限 ${limit} 字节`);
+        err.code = 'E_RESPONSE_TOO_LARGE';
+        err.hint = '缩小查询（如 --limit/--max-body），或调高 ARK_WEB_MAX_HTTP';
+        try { await reader.cancel(); } catch { /* 已断开 */ }
+        throw err;
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* 已释放 */ }
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 // ── 基础设施 ───────────────────────────────────────────────────────────────
 function token() {
@@ -37,18 +77,22 @@ function token() {
 
 async function api(pathname, opts = {}) {
   let res;
+  const { timeoutMs: requestTimeoutMsInput, maxResponseBytes, ...fetchOpts } = opts;
+  const requestTimeoutMs = Number(requestTimeoutMsInput || 30000);
   try {
     res = await fetch(BASE + pathname, {
-      ...opts,
+      ...fetchOpts,
+      signal: opts.signal || AbortSignal.timeout(requestTimeoutMs + 15000),
       headers: { authorization: `Bearer ${token()}`, 'content-type': 'application/json', ...(opts.headers || {}) }
     });
   } catch (e) {
-    const err = new Error(`连不上桥接 ${BASE}：${e.message}`);
-    err.code = 'E_BRIDGE_DOWN';
-    err.hint = '确认 server/bridge-server.js 在跑（curl ' + BASE + '/health）';
+    const isTimeout = e && (e.name === 'TimeoutError' || e.name === 'AbortError');
+    const err = new Error(isTimeout ? `连桥接超时（${requestTimeoutMs + 15000}ms）` : `连不上桥接 ${BASE}：${e.message}`);
+    err.code = isTimeout ? 'E_TIMEOUT' : 'E_BRIDGE_DOWN';
+    err.hint = '确认 server/bridge-server.js 在跑（curl ' + BASE + '/health）；页面无响应时可缩小请求或增大 timeoutMs/ARK_WEB_MAX_HTTP';
     throw err;
   }
-  const text = await res.text();
+  const text = await readLimitedText(res, maxResponseBytes || MAX_HTTP_BYTES);
   let body;
   try { body = JSON.parse(text); } catch { body = { raw: text }; }
   if (!res.ok) {
@@ -72,6 +116,7 @@ async function cmd(name, args = {}, timeoutMs = 30000, extOverride = null) {
   const conn = sel && typeof sel === 'object' ? sel.conn : null;
   const r = await api('/cmd', {
     method: 'POST',
+    timeoutMs,
     body: JSON.stringify({
       cmd: name, args, timeoutMs,
       ...(extId ? { extId } : {}),
@@ -137,10 +182,21 @@ function runSelfJson(argv, timeoutMs = 180000) {
       env: { ...process.env, ARK_WEB_JSON: '1' },
       windowsHide: true
     });
-    let out = '', err = '';
+    let out = '', err = '', outBytes = 0, errBytes = 0;
     const timer = setTimeout(() => { p.kill(); resolve({ ok: false, error: { code: 'E_FANOUT_TIMEOUT', message: `${timeoutMs}ms` } }); }, timeoutMs);
-    p.stdout.on('data', (d) => { out += d; });
-    p.stderr.on('data', (d) => { err += d; });
+    const appendCapped = (current, chunk, bytes) => {
+      const buf = Buffer.from(chunk);
+      const nextBytes = bytes + buf.length;
+      if (nextBytes > MAX_CHILD_OUTPUT) {
+        try { p.kill(); } catch { /* 已结束 */ }
+        clearTimeout(timer);
+        resolve({ ok: false, error: { code: 'E_OUTPUT_TOO_LARGE', message: `子命令输出超过 ${MAX_CHILD_OUTPUT} 字节` } });
+        return { text: current, bytes: nextBytes, overflow: true };
+      }
+      return { text: current + buf.toString('utf8'), bytes: nextBytes, overflow: false };
+    };
+    p.stdout.on('data', (d) => { const n = appendCapped(out, d, outBytes); out = n.text; outBytes = n.bytes; });
+    p.stderr.on('data', (d) => { const n = appendCapped(err, d, errBytes); err = n.text; errBytes = n.bytes; });
     p.on('close', () => {
       clearTimeout(timer);
       const line = out.trim().split('\n').filter(Boolean).pop() || '';
@@ -278,6 +334,13 @@ function toCsv(rows) {
   };
   return [headers.join(','), ...rows.map((r) => headers.map((h) => esc(r[h])).join(','))].join('\n');
 }
+
+
+const privateWrite = (file, data, opts) => {
+  const options = typeof opts === 'string' ? { encoding: opts } : (opts || {});
+  rawWriteFileSync(file, data, { ...options, mode: 0o600 });
+  try { chmodSync(file, 0o600); } catch { /* 尽力而为 */ }
+};
 
 const tabArgs = (opts) => (opts.tab !== undefined ? { tabId: positiveInt(opts.tab, 'tab') } : {});
 
@@ -430,7 +493,7 @@ const COMMANDS = {
       }, 120000);
       if (data.shot && data.shot.base64) {
         const buf = Buffer.from(data.shot.base64, 'base64');
-        writeFileSync(file, buf);
+        privateWrite(file, buf);
         data.shot = {
           file, bytes: buf.length, format: data.shot.format, clip: data.shot.clip, viewportForced: data.shot.viewportForced,
           ...(data.shot.uniform ? { uniform: true } : {})
@@ -475,6 +538,7 @@ const COMMANDS = {
       'no-confirm': P('flag', '不等效果确认（省 1 秒，但拿不到「点没点上」的判断）'),
       count: P('number', '连击次数', { default: 1 }),
       'hold-ms': P('number', '按下保持毫秒（长按场景）'),
+      follow: P('flag', '点击开新标签后自动把后续命令定位到新标签'),
       tab: P('number', '标签页 id')
     },
     example: 'click --ref 12   →  {settled:true, mutated:true, via:"cdp"}',
@@ -489,7 +553,8 @@ const COMMANDS = {
         force: opts.force === true,
         confirm: opts['no-confirm'] !== true,
         count: num(opts.count, 1, 'count'),
-        holdMs: num(opts['hold-ms'], 0, 'hold-ms')
+        holdMs: num(opts['hold-ms'], 0, 'hold-ms'),
+        follow: opts.follow === true
       }, 60000);
     }
   },
@@ -600,7 +665,7 @@ const COMMANDS = {
         timeoutMs: opts.timeout == null ? undefined : num(opts.timeout, 0, 'timeout')
       }, 90000);
       const buf = Buffer.from(r.base64, 'base64');
-      writeFileSync(file, buf);
+      privateWrite(file, buf);
       return {
         file, bytes: buf.length, format, clip: r.clip, viewportForced: r.viewportForced, focused: r.focused,
         vw: r.vw, vh: r.vh,
@@ -655,7 +720,7 @@ const COMMANDS = {
         url: r.url, title: r.title, chars: r.chars, text: r.text, truncated: r.truncated,
         ...(r.frames ? { frames: r.frames } : {})
       };
-      if (opts.out) { writeFileSync(String(opts.out), r.text, 'utf8'); data.file = String(opts.out); }
+      if (opts.out) { privateWrite(String(opts.out), r.text, 'utf8'); data.file = String(opts.out); }
       return data;
     }
   },
@@ -698,8 +763,8 @@ const COMMANDS = {
       const dump = (rows, data) => {
         if (!opts.out) return data;
         const f = String(opts.out);
-        if (f.endsWith('.csv')) writeFileSync(f, toCsv(rows), 'utf8');
-        else writeFileSync(f, JSON.stringify(rows, null, 2), 'utf8');
+        if (f.endsWith('.csv')) privateWrite(f, toCsv(rows), 'utf8');
+        else privateWrite(f, JSON.stringify(rows, null, 2), 'utf8');
         data.file = f;
         data.fileBytes = Buffer.byteLength(JSON.stringify(rows));
         return data;
@@ -840,8 +905,8 @@ const COMMANDS = {
       };
       if (opts.out) {
         const f = String(opts.out);
-        if (f.endsWith('.csv')) writeFileSync(f, toCsv(r.rows), 'utf8');
-        else writeFileSync(f, JSON.stringify(r.rows, null, 2), 'utf8');
+        if (f.endsWith('.csv')) privateWrite(f, toCsv(r.rows), 'utf8');
+        else privateWrite(f, JSON.stringify(r.rows, null, 2), 'utf8');
         data.file = f;
       }
       return data;
@@ -947,8 +1012,8 @@ const COMMANDS = {
       }, 45000);
       if (opts.out) {
         const f = String(opts.out);
-        if (r.base64) writeFileSync(f, Buffer.from(r.body, 'base64'));
-        else writeFileSync(f, r.body, 'utf8');
+        if (r.base64) privateWrite(f, Buffer.from(r.body, 'base64'));
+        else privateWrite(f, r.body, 'utf8');
         r.file = f;
         r.fileBytes = Buffer.byteLength(r.base64 ? Buffer.from(r.body, 'base64') : r.body);
       }
@@ -989,7 +1054,7 @@ const COMMANDS = {
         maxBody: num(opts['max-body'], 20000, 'max-body')
       }, 90000);
       const meta = { entries: r.log.entries.length, bodiesIncluded: r.bodiesIncluded, bodiesFailed: r.bodiesFailed };
-      if (opts.out) { writeFileSync(String(opts.out), JSON.stringify(r, null, 2), 'utf8'); return { ...meta, file: String(opts.out) }; }
+      if (opts.out) { privateWrite(String(opts.out), JSON.stringify(r, null, 2), 'utf8'); return { ...meta, file: String(opts.out) }; }
       return { ...meta, log: r.log };
     }
   },
@@ -1169,7 +1234,8 @@ const COMMANDS = {
       file: P('string', '录制文件（JSONL）', { required: true }),
       tab: P('number', '把所有步骤重定向到该标签页'),
       'stop-on-error': P('bool', '遇错即停，默认 true'),
-      dry: P('flag', '只列出将要执行的步骤，不真的跑')
+      dry: P('flag', '只列出将要执行的步骤，不真的跑'),
+      'allow-redacted': P('flag', '允许执行带脱敏占位符的步骤（默认拒绝）')
     },
     example: 'ARK_WEB_RECORD=flow.jsonl node client/browser-client.js ...（正常跑一遍）；之后 replay flow.jsonl --tab 12',
     run: async (pos, opts) => {
@@ -1179,11 +1245,17 @@ const COMMANDS = {
       const lines = readFileSync(file, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean);
       if (!lines.length) fail('E_PARAM', '录制文件是空的', '确认 ARK_WEB_RECORD 指向的是本次录制的文件');
       const steps = [];
+      let redactedCount = 0;
       for (const line of lines) {
         let rec;
         try { rec = JSON.parse(line); } catch { continue; }
         if (!Array.isArray(rec.argv) || !rec.argv.length) continue;
+        if (rec.redacted || rec.argv.includes('«redacted»')) redactedCount++;
         steps.push([...rec.argv]);
+      }
+      const allowRedacted = opts['allow-redacted'] === true || String(opts['allow-redacted'] ?? '').toLowerCase() === 'true';
+      if (redactedCount > 0 && !allowRedacted && opts.dry !== true) {
+        fail('E_REDACTED_REPLAY', `录制文件含 ${redactedCount} 个脱敏步骤，默认不会执行 «redacted» 占位符`, '把占位符改成真实值后再跑；仅查看步骤可加 --dry；确实要原样执行才传 --allow-redacted');
       }
       const out = [];
       for (const argv of steps) {
@@ -1513,7 +1585,7 @@ const HELP = `Ark Web 浏览器 CLI v${VERSION}（加 --json 输出 envelope；d
 
 多浏览器：tabs 默认聚合；任意命令加 --ext <extId|chrome|edge>、--browser <名字> 或 --conn <连接键> 指定目标；
          fanout "<命令>" 在所有浏览器并行执行。
-环境变量：ARK_WEB_BASE / ARK_WEB_TOKEN / ARK_WEB_JSON=1 / ARK_WEB_RECORD=<文件>
+环境变量：ARK_WEB_BASE / ARK_WEB_TOKEN / ARK_WEB_JSON=1 / ARK_WEB_RECORD=<文件>（录制内容默认脱敏，replay 默认拒绝 «redacted» 步骤）
 `;
 
 async function main() {
@@ -1527,7 +1599,13 @@ async function main() {
   // 录制：设置 ARK_WEB_RECORD=flow.jsonl 后，每条命令都会追加进去，供 replay 复用
   const rec = process.env.ARK_WEB_RECORD;
   if (rec && command !== 'replay') {
-    try { appendFileSync(rec, JSON.stringify({ argv, at: Date.now() }) + '\n'); } catch { /* 忽略录制失败 */ }
+    try {
+      // 录制文件默认脱敏：密码/token/请求体/URL query 不落盘。
+      // 脱敏步骤带 redacted 标记，replay 默认拒绝执行，避免把占位符当成真实输入。
+      const safe = redactArgv(argv);
+      appendFileSync(rec, JSON.stringify({ argv: safe.argv, at: Date.now(), redacted: safe.redacted }) + '\n', { mode: 0o600 });
+      try { chmodSync(rec, 0o600); } catch { /* 尽力而为 */ }
+    } catch { /* 忽略录制失败 */ }
   }
   try {
     if (opts.conn !== undefined && opts.conn !== true) {

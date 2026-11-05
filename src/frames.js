@@ -234,6 +234,18 @@ export async function frameOffsetOf(tabId, frameId) {
     walk(tree.frameTree, null);
 
     const rootCdp = nodes[0].cdpId;
+    // 同 URL 的多个 iframe 在 CDP↔scripting 两个 ID 空间之间无法可靠一一映射；
+    // 猜错会把点击打到错误位置，这里保守放弃 CDP 几何，调用方退回页面内合成输入。
+    const chromeCount = new Map();
+    for (const [url, ids] of byUrl) chromeCount.set(url, ids.length);
+    const cdpCount = new Map();
+    for (const n of nodes) {
+      if (n.parent == null) continue;
+      cdpCount.set(n.url, (cdpCount.get(n.url) || 0) + 1);
+    }
+    for (const [url, count] of chromeCount) {
+      if (count > 1 && (cdpCount.get(url) || 0) === count) return null;
+    }
     const cdpToChrome = new Map([[rootCdp, 0]]);
     const usedChrome = new Set([0]);
     for (const n of nodes) {

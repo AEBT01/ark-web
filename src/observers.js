@@ -7,6 +7,7 @@
  */
 
 import { cdp } from './cdp.js';
+import { sanitizeForDisk, sanitizeText } from '../shared/redaction.mjs';
 
 export const consoleBuf = new Map(); // tabId -> [{level,text,at}]
 export const netBuf = new Map();     // tabId -> Map(requestId -> entry)
@@ -37,6 +38,20 @@ export async function setIntercept(tabId, on) {
   return { intercepting: intercepting.has(tabId) };
 }
 
+function isUnsafeRegex(pattern) {
+  if (typeof pattern !== 'string') return true;
+  if (pattern.length > 160) return true;
+  // 拒绝过大的固定重复：{21,} / {100} 之类会放大回溯成本
+  const bounds = pattern.match(/\{\s*\d+(?:\s*,\s*\d*)?\s*\}/g) || [];
+  for (const b of bounds) {
+    const nums = (b.match(/\d+/g) || ['0']).map(Number);
+    if (nums.some((n) => n > 20)) return true;
+  }
+  // 拒绝常见的灾难性回溯形态：分组内已有量词，外面又套量词，例如 (a+)+
+  if (/\([^)]*[+*?][^)]*\)\s*(?:[+*]|\{)/.test(pattern)) return true;
+  return false;
+}
+
 function matchRule(rule, url) {
   if (!rule) return false;
   if (rule.method && rule.method !== '*') {
@@ -44,7 +59,10 @@ function matchRule(rule, url) {
   }
   if (!rule.pattern) return true;
   try {
-    if (rule.regex) return new RegExp(rule.pattern).test(url);
+    if (rule.regex) {
+      if (isUnsafeRegex(rule.pattern)) return false;
+      return new RegExp(rule.pattern).test(url);
+    }
     return url.includes(rule.pattern);
   } catch { return false; }
 }
@@ -89,19 +107,9 @@ export const dialogLogOf = (tabId) => bufOf(dialogLog, tabId);
 const PERSIST_KEY = (tabId) => `ark:obs:${tabId}`;
 const PERSIST_MAX = 200;
 const persistTimers = new Map();
-const SENSITIVE_HEADER = /^(cookie|set-cookie|authorization|proxy-authorization)$/i;
 
-/** 落盘前移除凭据类头；内存里仍保留完整数据供 net-har 本次会话使用 */
-function forDisk(e) {
-  const o = { ...e };
-  if (o.headers) {
-    o.headers = Object.fromEntries(Object.entries(o.headers).filter(([k]) => !SENSITIVE_HEADER.test(k)));
-  }
-  if (o.resHeaders) {
-    o.resHeaders = Object.fromEntries(Object.entries(o.resHeaders).filter(([k]) => !SENSITIVE_HEADER.test(k)));
-  }
-  return o;
-}
+/** 落盘前统一脱敏：URL query、凭据 headers、请求体、控制台文本都按共享规则处理。 */
+const forDisk = (e) => sanitizeForDisk(e);
 
 function schedulePersist(tabId) {
   if (persistTimers.has(tabId)) return;
@@ -109,7 +117,7 @@ function schedulePersist(tabId) {
     persistTimers.delete(tabId);
     try {
       const net = [...netOf(tabId).values()].slice(-PERSIST_MAX).map(forDisk);
-      const con = (consoleBuf.get(tabId) || []).slice(-PERSIST_MAX);
+      const con = (consoleBuf.get(tabId) || []).slice(-PERSIST_MAX).map((c) => ({ ...c, text: sanitizeText(c.text) }));
       await chrome.storage.session.set({ [PERSIST_KEY(tabId)]: { net, con, at: Date.now() } });
     } catch { /* 配额或权限问题不影响主流程 */ }
   }, 1200));

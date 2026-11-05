@@ -1,4 +1,4 @@
-# Ark Web Bridge v5.1
+# Ark Web Bridge v5.1.1
 
 > Control your **real** Chromium browser from AI agents — MV3 extension + local Node bridge + AI-oriented CLI.
 > 中文主文档见 [README.md](README.md)。
@@ -33,7 +33,7 @@ node client\browser-client.js click --ref 12
 ```
 
 CLI: `node client\browser-client.js describe` for the full 42-command surface.
-Agent manual: [SKILL.md](SKILL.md). Tests: `npm test` (135 checks; requires a running bridge + loaded extension).
+Agent manual: [SKILL.md](SKILL.md). Tests: `npm test` (135 browser integration checks; requires a running bridge + loaded extension) and `npm run test:unit` (7 unit checks).
 
 ## Multi-browser
 
@@ -51,6 +51,8 @@ The same unpacked extension has the same extId in Chrome and Edge; use `--browse
 - Token at `~/.ark-web/token`; no token endpoint
 - Extension channel: ID whitelist + shared secret (`~/.ark-web/ws-secret` + `ark-ws-secret.txt`)
 - Unverified connections never enter the usable extension table; responses are bound to the connection
+- Missing whitelist starts read-only pairing mode; `/cmd` and `/reload` are blocked until the extension is registered
+- Recordings (`ARK_WEB_RECORD`) and generated files are redacted/0600; `replay` refuses `«redacted»` placeholders by default
 - Audit log redacts nested params, URL queries, passwords, tokens and bodies
 
 ## License

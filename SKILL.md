@@ -220,7 +220,10 @@ frame 会动态出现：每次调用前用「小探针 + 只补缺的」方式�
 - **脱敏**：`input[type=password]` 的值在快照、属性、断言、fill 返回值里一律返回 `••••••`；
   fill 的匹配校验在页面内完成，不把明文带回扩展侧。
 - **扩展通道**：ID 白名单 + `~/.ark-web/ws-secret` 共享密钥；未完成 hello 的连接不进入可用表，
-  响应必须来自请求实际发送到的连接；白名单文件损坏时 fail-closed。
+  响应必须来自请求实际发送到的连接；白名单文件损坏时 fail-closed；缺少白名单时只开放只读配对，
+  `/cmd` 和 `/reload` 返回 `E_PAIRING_REQUIRED`（可用 `ARK_WEB_ALLOW_UNLABELED=1` 显式放行）。
+- **回放**：`ARK_WEB_RECORD` 的录制 argv 会按共享规则脱敏；`replay` 默认拒绝含 `«redacted»` 的步骤，
+  避免把占位符当成真实输入提交。HAR 的 URL/header/postData/响应正文也使用同一脱敏链路。
 
 ## 七、自检
 
@@ -243,7 +246,7 @@ node test\selftest.js -k extract # 只跑名字含 extract 的项
 
 - **只支持 Chromium 系**（Chrome / Edge）
 - 网络/控制台缓冲上限 800 条/标签页；最近 200 条落 `storage.session`（30 分钟时效），
-  SW 被回收或扩展重载后仍能接回历史；落盘副本移除 Cookie/Authorization 头
+  SW 被回收或扩展重载后仍能接回历史；落盘副本统一脱敏 URL query、凭据头、请求体和疑似密钥文本
 - `coverage` 只能统计 `start` 之后编译的脚本：要覆盖整页，请在导航前 `coverage --mode start`（已加载页面可先 `eval "location.reload()"`）
 - 截图在窗口被遮挡/最小化时**不再盲等**：分级探测（900→2500→8000ms）后直接给 `E_TAB_HIDDEN`/`E_OCCLUDED`，最坏约 3.5 秒
 - 后台标签（`--tab-bg`）截图受 Chrome 合成节流：实测前台约 0.4s、后台约 3.5s；要快就先 `activate`

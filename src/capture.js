@@ -8,7 +8,7 @@
  *  4. 纯色帧（渲染器没出帧的竞态）自动重试，仍纯色则带 uniform 标记返回，不误报错误。
  */
 
-import { cdp, ensureFocusEmulation, getDeviceMetrics } from './cdp.js';
+import { cdp, ensureFocusEmulation, releaseFocusEmulation, getDeviceMetrics } from './cdp.js';
 import { callMain, invoke } from './frames.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -275,6 +275,7 @@ export async function captureShot(tabId, args = {}) {
       return await finish(r, { focused: true }, T2);
     }
   } finally {
+    await releaseFocusEmulation(tabId).catch(() => null);
     if (labelItems) await invoke(tabId, 0, 'clearLabels', []).catch(() => null);
     // 只恢复自己动过的覆盖：有 emulate 时恢复原参数，没有才清空
     if (kicked || forced) {

@@ -23,9 +23,10 @@ Write-Host '[1/4] 停止计划任务（若有）' -ForegroundColor Cyan
 Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
-Write-Host '[2/4] 清理残留 node 进程' -ForegroundColor Cyan
+Write-Host '[2/4] 清理残留 node 进程（精确匹配本项目 bridge-server.js）' -ForegroundColor Cyan
+$escapedJs = [regex]::Escape($js)
 Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -match 'bridge-server\.js' } |
+    Where-Object { $_.CommandLine -match $escapedJs } |
     ForEach-Object {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         Write-Host "      停止 PID $($_.ProcessId)"

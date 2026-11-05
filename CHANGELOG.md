@@ -1,5 +1,30 @@
 # Changelog
 
+## v5.1.1 — 2026-11-06
+
+### 安全
+
+- HAR 的 URL、请求/响应 header、postData、响应正文统一脱敏；base64 正文先解码再处理
+- `ARK_WEB_RECORD` 录制的 argv 默认脱敏，`replay` 默认拒绝含 `«redacted»` 的步骤
+- 最近 200 条网络/控制台落 `storage.session` 前统一脱敏 URL query、凭据头、请求体和疑似密钥文本
+- 缺少扩展白名单时只开放只读配对接口；`/cmd` 与 `/reload` 返回 `E_PAIRING_REQUIRED`
+- HTTP 请求体改为按字节计算并限制 `Content-Length`；扩展请求 `timeoutMs` 限制在 1–120 秒；pending 上限 64
+- WebSocket 共享密钥和 HTTP token 改为摘要后常数时间比较；`?token=` 不再接受
+- 输出文件与录制文件使用 0600 权限；审计归档最多保留 10 个
+- 拦截正则拒绝过长模式和灾难性嵌套量词；net-rule 最多 100 条
+
+### 正确性
+
+- 扩展代码指纹改为文件内容 SHA-256，避免仅 touch 触发热重载或同大小/mtime 漏检
+- 同 URL 多个跨域 iframe 无法可靠映射时停止 CDP 几何猜测，退回页面内合成输入
+- 自动启用的焦点仿真在动作/截图结束后恢复，避免页面长期被标记为可见
+- 点击开新标签后默认不再自动切换 lastTab；显式传 `--follow` 才切换
+
+### 工程
+
+- 新增 `test/unit`（7 项），`npm run test:unit` 可单独执行
+- 加入 `package-lock.json`，`npm ci` 可复现安装
+
 ## v5.1.0 — 2026-11-05
 
 ### 安全

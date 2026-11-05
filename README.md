@@ -85,12 +85,16 @@ node client\browser-client.js fanout "snapshot --limit 20 --no-shot"   # 所有�
 - 只绑 `127.0.0.1`；网页来源（`http(s)://` Origin）一律拒绝，扩展来源仅放行 `/health` 与 `/ext/version`
 - 令牌在 `~/.ark-web/token`，**没有任何取令牌的端点**；CLI 直读文件
 - 扩展通道双重门禁：ID 白名单 + `~/.ark-web/ws-secret` 共享密钥（服务端同时写 `ark-ws-secret.txt` 供扩展读取）。未完成 hello 的连接不进入可用扩展表，响应必须来自请求实际发送到的连接
+- 缺少扩展白名单时进入**只读配对模式**：只开放 `/health`、`/status`、`/ext/version`，`/cmd` 和 `/reload` 返回 `E_PAIRING_REQUIRED`；只有 `node scripts/label-browsers.js --yes` 登记后才可操作。确需跳过时可设 `ARK_WEB_ALLOW_UNLABELED=1`
 - 白名单文件损坏时 **fail-closed**（拒绝所有扩展），不会被静默绕过
+- `?token=` 不再支持；CLI 一律用 `Authorization: Bearer`
 - 无默认标签回退：没指定 `--tab` 且没有最近操作标签时报 `E_NO_TAB`，绝不误操作你正在看的页面
 - 动作全部先验证再执行：可见性 / 禁用 / 遮挡 / 指纹，任一不满足就报错并给出修复动作
 - 审计：每条命令写入 `~/.ark-web/logs/audit.jsonl`（时间/命令/参数摘要/成败/耗时，5MB 轮转）；嵌套参数、URL query、密码/token/body 等敏感键深度脱敏，`eval` 代码只留截断
 - 脱敏：密码框的值在快照/属性/断言里一律返回 `••••••`，fill 校验在页面内完成，不回传明文
-- 网络/控制台最近 200 条落 `storage.session`，落盘前移除 Cookie/Authorization 头
+- 网络/控制台最近 200 条落 `storage.session`，落盘副本会统一脱敏 URL query、凭据头、请求体和疑似密钥文本
+- HAR 的 URL、header、postData、响应正文都会按共享规则脱敏；`--no-bodies` 可完全跳过正文
+- `ARK_WEB_RECORD` 录制文件默认脱敏，`replay` 遇到 `«redacted»` 占位符会拒绝执行
 - 同 tab 命令串行执行（不带 `--tab` 时按最近操作标签入队），避免并发竞争 ref 注册表与输入焦点
 
 ## 测试

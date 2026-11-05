@@ -108,3 +108,14 @@ export async function ensureFocusEmulation(tabId) {
     return true;
   } catch { return false; }
 }
+
+/** 命令结束后恢复自动启用的焦点仿真，避免页面长期以为自己可见。用户显式 emulate 不受影响。 */
+export async function releaseFocusEmulation(tabId) {
+  if (!focusEmulated.has(tabId)) return false;
+  try {
+    await ensureAttached(tabId);
+    await chrome.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: false });
+    focusEmulated.delete(tabId);
+    return true;
+  } catch { return false; }
+}

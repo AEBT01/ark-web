@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Ark Web Bridge",
-  "version": "5.1.0",
-  "description": "鏈湴娴忚鍣ㄦˉ鎺ワ細鎶婃爣绛鹃〉鑳藉姏缁?WebSocket 鏆撮湶缁?127.0.0.1:9333 鐨?bridge-server",
+  "version": "5.1.1",
+  "description": "本地浏览器桥接：把标签页能力经 WebSocket 暴露给 127.0.0.1:9333 的 bridge-server",
   "permissions": [
     "tabs",
     "debugger",

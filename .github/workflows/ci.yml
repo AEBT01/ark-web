@@ -13,7 +13,9 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+      - name: Run unit checks
+        run: npm run test:unit
       - name: Syntax check all JS
         run: |
           find . -name "*.js" -not -path "./node_modules/*" -print0 | xargs -0 -I{} node --check {}

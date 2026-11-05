@@ -23,14 +23,15 @@
  */
 
 import http from 'node:http';
-import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, watch, readdirSync, statSync, renameSync } from 'node:fs';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, watch, readdirSync, statSync, renameSync, chmodSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { sanitizeArgs, redactUrl, sanitizeText } from '../shared/redaction.mjs';
 
-const VERSION = '5.1.0';
+const VERSION = '5.1.1';
 const PORT = Number(process.env.ARK_WEB_PORT || 9333);
 const HOST = '127.0.0.1';
 const EXT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,6 +42,10 @@ const WS_SECRET_FILE = path.join(TOKEN_DIR, 'ws-secret');
 const EXT_SECRET_COPY = path.join(EXT_ROOT, 'ark-ws-secret.txt');
 const LOG_DIR = path.join(TOKEN_DIR, 'logs');
 const MAX_BODY = Number(process.env.ARK_WEB_MAX_BODY || 2 * 1024 * 1024);
+const MAX_PENDING = Number(process.env.ARK_WEB_MAX_PENDING || 64);
+const MAX_AUDIT_ARCHIVES = Number(process.env.ARK_WEB_MAX_AUDIT_ARCHIVES || 10);
+const EXT_TIMEOUT_MIN = 1000;
+const EXT_TIMEOUT_MAX = 120000;
 const HEARTBEAT_MS = 20000;
 
 // ── 热重载：扩展代码指纹 ───────────────────────────────────────────────────
@@ -67,11 +72,13 @@ function fingerprint() {
   let total = 0;
   for (const f of files) {
     try {
-      const st = statSync(f);
-      total += st.size;
-      h.update(path.relative(EXT_ROOT, f));
-      h.update(String(st.size));
-      h.update(String(Math.floor(st.mtimeMs)));
+      const rel = path.relative(EXT_ROOT, f);
+      const buf = readFileSync(f);          // 内容指纹：只 touch 不会误触发热重载
+      total += buf.length;
+      h.update(rel);
+      h.update('\0');
+      h.update(buf);
+      h.update('\0');
     } catch { /* 文件刚被替换，跳过 */ }
   }
   return { hash: h.digest('hex').slice(0, 16), files: files.length, bytes: total };
@@ -100,10 +107,12 @@ mkdirSync(LOG_DIR, { recursive: true });
 function loadToken() {
   if (existsSync(TOKEN_FILE)) {
     const t = readFileSync(TOKEN_FILE, 'utf8').trim();
+    try { chmodSync(TOKEN_FILE, 0o600); } catch { /* 尽力而为 */ }
     if (t.length >= 32) return t;
   }
   const t = randomBytes(32).toString('hex');
   writeFileSync(TOKEN_FILE, t, { mode: 0o600 });
+  try { chmodSync(TOKEN_FILE, 0o600); } catch { /* Windows ACL 由用户目录保护 */ }
   return t;
 }
 
@@ -124,6 +133,14 @@ function loadWhitelist() {
   }
 }
 
+/** 缺少白名单时只开放只读配对接口，避免首装/清空白名单后默认放行所有扩展。 */
+function pairingRequired() {
+  if (process.env.ARK_WEB_ALLOW_UNLABELED === '1') return false;
+  const wl = loadWhitelist();
+  if (wl.corrupt) return false; // 损坏时 fail-closed，走原白名单逻辑
+  return wl.ids.size === 0;
+}
+
 /**
  * 扩展通道共享密钥。
  * 服务端生成后同时写到扩展目录，扩展通过 chrome.runtime.getURL 读取并放进 hello。
@@ -136,9 +153,11 @@ function loadWsSecret() {
   } catch { /* 读不到就重建 */ }
   if (secret.length < 32) {
     secret = randomBytes(32).toString('hex');
-    try { writeFileSync(WS_SECRET_FILE, secret, { mode: 0o600 }); } catch { /* 权限问题下面仍会尝试 */ }
+    try { writeFileSync(WS_SECRET_FILE, secret, { mode: 0o600 }); chmodSync(WS_SECRET_FILE, 0o600); } catch { /* 权限问题下面仍会尝试 */ }
+  } else {
+    try { chmodSync(WS_SECRET_FILE, 0o600); } catch { /* 尽力而为 */ }
   }
-  try { writeFileSync(EXT_SECRET_COPY, secret, 'utf8'); } catch { /* 扩展目录不可写时退回 ID 白名单 */ }
+  try { writeFileSync(EXT_SECRET_COPY, secret, { mode: 0o600 }); chmodSync(EXT_SECRET_COPY, 0o600); } catch { /* 扩展目录不可写时退回 ID 白名单 */ }
   return secret;
 }
 
@@ -264,70 +283,44 @@ function isBrowserOrigin(req) {
   return Boolean(req.headers.origin || req.headers['sec-fetch-site']);
 }
 
+function secretMatches(candidate) {
+  const a = createHash('sha256').update(String(candidate ?? '')).digest();
+  const b = createHash('sha256').update(WS_SECRET).digest();
+  return timingSafeEqual(a, b);
+}
+
 function authOk(req, url) {
   const h = req.headers.authorization || '';
   const bearer = h.startsWith('Bearer ') ? h.slice(7) : '';
-  const q = url.searchParams.get('token') || '';
-  const given = bearer || q;
+  const given = bearer;
   if (!given) return false;
-  // 定长比较，避免时序侧信道
-  const a = Buffer.from(createHash('sha256').update(given).digest('hex'));
-  const b = Buffer.from(createHash('sha256').update(TOKEN).digest('hex'));
-  return a.length === b.length && a.equals(b);
+  const a = createHash('sha256').update(given).digest();
+  const b = createHash('sha256').update(TOKEN).digest();
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 // ── 审计日志 ───────────────────────────────────────────────────────────────
-// 每条命令写一行 JSONL：谁在什么时候让浏览器做了什么。文本/文件内容一律脱敏，
-// 只留长度——审计需要的是「发生了什么动作」，不是用户的输入内容。
-const SECRET_KEYS = new Set([
-  'text', 'value', 'file', 'files', 'password', 'passwd', 'secret', 'token',
-  'authorization', 'cookie', 'cookies', 'set-cookie', 'body', 'postdata',
-  'expression', 'content'
-]);
-
-function redactUrl(value) {
-  try {
-    const u = new URL(String(value));
-    for (const key of [...u.searchParams.keys()]) u.searchParams.set(key, '«redacted»');
-    return u.toString();
-  } catch { return String(value).slice(0, 300); }
-}
-
-function sanitizeValue(key, value, depth) {
-  if (value === undefined) return undefined;
-  if (depth > 4) return '«deep»';
-  if (key && SECRET_KEYS.has(String(key).toLowerCase())) {
-    if (typeof value === 'string') return `«redacted:${value.length}»`;
-    if (Array.isArray(value)) return `«redacted:${value.length}»`;
-    return '«redacted»';
-  }
-  if (key && String(key).toLowerCase() === 'url') return redactUrl(value);
-  if (key && String(key).toLowerCase() === 'code') return String(value).slice(0, 200);
-  if (Array.isArray(value)) return value.map((v) => sanitizeValue(null, v, depth + 1));
-  if (value && typeof value === 'object') return sanitizeArgs(value, depth + 1);
-  if (typeof value === 'string' && value.length > 300) return value.slice(0, 300) + `…(${value.length})`;
-  return value;
-}
-
-function sanitizeArgs(args = {}, depth = 0) {
-  const out = {};
-  for (const [k, v] of Object.entries(args || {})) {
-    if (v === undefined) continue;
-    out[k] = sanitizeValue(k, v, depth);
-  }
-  return out;
-}
+// 每条命令写一行 JSONL：谁在什么时候让浏览器做了什么。参数由 shared/redaction.mjs 深度脱敏。
 
 function audit(entry) {
   try {
     mkdirSync(LOG_DIR, { recursive: true });
     const file = path.join(LOG_DIR, 'audit.jsonl');
-    try {
-      if (existsSync(file) && statSync(file).size > 5 * 1024 * 1024) {
-        renameSync(file, path.join(LOG_DIR, `audit-${Date.now()}.jsonl`));
+    if (existsSync(file) && statSync(file).size > 5 * 1024 * 1024) {
+      const archive = path.join(LOG_DIR, `audit-${Date.now()}.jsonl`);
+      renameSync(file, archive);
+      try { chmodSync(archive, 0o600); } catch { /* 尽力而为 */ }
+      // 只保留最近 N 个归档，避免无限增长
+      const archives = readdirSync(LOG_DIR)
+        .filter((name) => /^audit-\d+\.jsonl$/.test(name))
+        .map((name) => ({ name, path: path.join(LOG_DIR, name), mtime: statSync(path.join(LOG_DIR, name)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime);
+      for (const old of archives.slice(MAX_AUDIT_ARCHIVES)) {
+        try { unlinkSync(old.path); } catch { /* 清理失败不影响主流程 */ }
       }
-    } catch { /* 轮转失败不影响写入 */ }
+    }
     appendFileSync(file, JSON.stringify(entry) + '\n');
+    try { chmodSync(file, 0o600); } catch { /* 尽力而为 */ }
   } catch { /* 审计失败不影响主流程 */ }
 }
 
@@ -341,7 +334,7 @@ function json(res, code, obj) {
   res.end(body);
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer({ headersTimeout: 5000, requestTimeout: 15000, keepAliveTimeout: 5000, maxHeaderSize: 16 * 1024 }, async (req, res) => {
   let url;
   try { url = new URL(req.url, `http://${HOST}:${PORT}`); }
   catch { return json(res, 400, { error: '非法 URL' }); }
@@ -367,6 +360,7 @@ const server = http.createServer(async (req, res) => {
       pendingHandshakes: Math.max(0, extensions.size - liveExtensions().length),
       swept: stale,
       extHash: current.hash,
+      pairingRequired: pairingRequired(),
       reloadSeq
     });
   }
@@ -383,6 +377,7 @@ const server = http.createServer(async (req, res) => {
 
   // 手动触发热重载
   if (url.pathname === '/reload' && req.method === 'POST') {
+    if (pairingRequired()) return json(res, 403, { error: '尚未完成扩展登记，禁止热重载', code: 'E_PAIRING_REQUIRED', hint: '运行 node scripts/label-browsers.js --yes 登记扩展' });
     broadcastReload('manual');
     return json(res, 200, { ok: true, ...current, reloadSeq });
   }
@@ -397,29 +392,44 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, {
       connected: pickExt() !== null, extensions: list,
       whitelisted: wl.ids.size, whitelistCorrupt: wl.corrupt,
+      pairingRequired: pairingRequired(),
       auth: WS_SECRET ? 'secret+whitelist' : 'whitelist'
     });
   }
 
   if (url.pathname === '/cmd' && req.method === 'POST') {
-    let raw = '';
+    if (pairingRequired()) return json(res, 403, { error: '尚未完成扩展登记，禁止执行浏览器操作', code: 'E_PAIRING_REQUIRED', hint: '运行 node scripts/label-browsers.js --yes 登记扩展' });
+    const length = Number(req.headers['content-length'] || 0);
+    if (Number.isFinite(length) && length > MAX_BODY) return json(res, 413, { error: `请求体超过上限 ${MAX_BODY} 字节`, code: 'E_TOO_LARGE' });
+    const chunks = [];
+    let bytes = 0;
     let tooLarge = false;
-    for await (const c of req) {
-      raw += c;
-      if (raw.length > MAX_BODY) { tooLarge = true; req.resume(); break; }
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buf.length;
+      if (bytes > MAX_BODY) { tooLarge = true; req.destroy(); break; }
+      chunks.push(buf);
     }
     if (tooLarge) return json(res, 413, { error: `请求体超过上限 ${MAX_BODY} 字节`, code: 'E_TOO_LARGE' });
+    const raw = Buffer.concat(chunks).toString('utf8');
     let body;
     try { body = raw ? JSON.parse(raw) : {}; } catch { return json(res, 400, { error: 'body 不是合法 JSON' }); }
     const cmd = body.cmd;
     if (typeof cmd !== 'string') return json(res, 400, { error: '缺少 cmd 字段' });
     const t0 = Date.now();
+    if (pending.size >= MAX_PENDING) {
+      return json(res, 503, { ok: false, cmd, error: '扩展通道繁忙，待处理请求已达上限', code: 'E_OVERLOADED', hint: `稍后重试，或降低并发；上限 ${MAX_PENDING}` });
+    }
+    const rawTimeout = Number(body.timeoutMs ?? 30000);
+    const timeoutMs = Number.isFinite(rawTimeout)
+      ? Math.max(EXT_TIMEOUT_MIN, Math.min(EXT_TIMEOUT_MAX, Math.floor(rawTimeout)))
+      : 30000;
     const wantedExtId = body.extId ? String(body.extId) : null;
     const wantedConn = body.conn ? String(body.conn) : null;
     const target = pickExt(wantedExtId, wantedConn);
     const meta = target ? { extId: target.extId ?? null, browser: target.browser || null, conn: extractKeyOf(target) } : {};
     try {
-      const data = await callExtension(cmd, body.args ?? {}, body.timeoutMs ?? 30000, wantedExtId, wantedConn);
+      const data = await callExtension(cmd, body.args ?? {}, timeoutMs, wantedExtId, wantedConn);
       const elapsedMs = Date.now() - t0;
       audit({ at: new Date().toISOString(), cmd, args: sanitizeArgs(body.args), ok: true, elapsedMs });
       return json(res, 200, { ok: true, cmd, data, ...meta, elapsedMs });
@@ -480,7 +490,7 @@ wss.on('connection', (ws, req) => {
       const extId = msg.extId ? String(msg.extId) : null;
 
       // 1) 共享密钥：服务端生成，扩展从自身目录的 ark-ws-secret.txt 读取
-      if (!msg.secret || String(msg.secret) !== WS_SECRET) {
+      if (!secretMatches(msg.secret)) {
         log(`拒绝握手：共享密钥不匹配 id=${extId ?? '?'}`);
         rejectHandshake(ws, id, 'bad-secret',
           '扩展未拿到 ark-ws-secret.txt。确认 bridge-server 已启动，然后重载扩展');
