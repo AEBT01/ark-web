@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ark Web v5.1 — Control your real browser from AI</title>
+<style>
+  :root{color-scheme:light dark;--bg:#0b0d10;--fg:#e8eef7;--muted:#93a4b8;--line:#243041;--acc:#4da3ff}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 system-ui,"Segoe UI",sans-serif}
+  main{max-width:880px;margin:0 auto;padding:64px 24px}
+  h1{font-size:42px;line-height:1.15;margin:0 0 12px} h2{margin-top:44px;font-size:22px}
+  p{color:var(--muted)} a{color:var(--acc)} code{background:#141a22;padding:2px 6px;border-radius:5px}
+  .badge{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 10px;color:var(--muted);font-size:13px;margin:0 6px 6px 0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin-top:18px}
+  .card{border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:#0f141b}
+  .card b{display:block;margin-bottom:6px;color:var(--fg)}
+  pre{overflow:auto;background:#0f141b;border:1px solid var(--line);border-radius:12px;padding:16px}
+  footer{margin-top:56px;border-top:1px solid var(--line);padding-top:20px;font-size:14px;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <span class="badge">v5.1.0</span><span class="badge">MIT</span><span class="badge">42 commands</span><span class="badge">135 tests</span>
+  <h1>Ark Web</h1>
+  <p><strong>Control your real Chromium browser from AI.</strong> MV3 extension + local Node bridge + an AI-oriented CLI. Real CDP input, cross-frame/shadow DOM, verification-first actions, multi-browser, audit engine.</p>
+  <p><a href="https://github.com/AEBT01/ark-web">GitHub Repository</a> · <a href="https://github.com/AEBT01/ark-web/releases/tag/v5.1.0">Release v5.1.0</a> · <a href="https://github.com/AEBT01/ark-web/blob/main/SKILL.md">Agent Manual</a></p>
+
+  <h2>Why it is different</h2>
+  <div class="grid">
+    <div class="card"><b>Real input</b>CDP <code>Input.*</code>, not synthetic DOM events. Hover, focus, IME and default behaviours work.</div>
+    <div class="card"><b>State-safe refs</b>Fingerprinted ref registry; stale refs fail loudly instead of clicking the wrong element.</div>
+    <div class="card"><b>Cross boundaries</b>Every frame gets an agent; iframes and open shadow roots share one ref space.</div>
+    <div class="card"><b>Self-verifying</b>Fill read-back, click effect confirmation, assertions, screenshots with numbered refs.</div>
+    <div class="card"><b>Multi-browser</b>Aggregate tabs, target by <code>--browser</code>/<code>--conn</code>, fan out commands in parallel.</div>
+    <div class="card"><b>Hardened</b>Loopback only, token auth, extension shared secret, whitelist fail-closed, redacted audit.</div>
+  </div>
+
+  <h2>Quick start</h2>
+<pre><code>node server/bridge-server.js
+# chrome://extensions -> Developer mode -> Load unpacked -> this directory
+node scripts/label-browsers.js --yes
+node client/browser-client.js status
+node client/browser-client.js open https://example.com --tab-bg
+node client/browser-client.js snapshot shot.webp --shot
+node client/browser-client.js find --text "Sign in" --role button
+node client/browser-client.js click --ref 12</code></pre>
+
+  <footer>Ark Web v5.1.0 · MIT · Local-first, no cloud dependency.</footer>
+</main>
+</body>
+</html>
