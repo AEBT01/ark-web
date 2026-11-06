@@ -19,7 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { redactArgv } from '../shared/redaction.mjs';
 
-const VERSION = '5.1.1';
+const VERSION = '5.1.2';
 const BASE = process.env.ARK_WEB_BASE || 'http://127.0.0.1:9333';
 const TOKEN_FILE = path.join(os.homedir(), '.ark-web', 'token');
 const SELF = fileURLToPath(import.meta.url);

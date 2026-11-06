@@ -1,6 +1,6 @@
 {
   "name": "ark-web-browser-extension",
-  "version": "5.1.1",
+  "version": "5.1.2",
   "private": true,
   "type": "module",
   "description": "Ark Web 浏览器桥接：MV3 扩展 + 本地 bridge-server + 面向 AI 的 CLI",

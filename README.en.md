@@ -1,4 +1,4 @@
-# Ark Web Bridge v5.1.1
+# Ark Web Bridge v5.1.2
 
 > Control your **real** Chromium browser from AI agents — MV3 extension + local Node bridge + AI-oriented CLI.
 > 中文主文档见 [README.md](README.md)。
@@ -33,7 +33,7 @@ node client\browser-client.js click --ref 12
 ```
 
 CLI: `node client\browser-client.js describe` for the full 42-command surface.
-Agent manual: [SKILL.md](SKILL.md). Tests: `npm test` (135 browser integration checks; requires a running bridge + loaded extension) and `npm run test:unit` (7 unit checks).
+Agent manual: [SKILL.md](SKILL.md). Tests: `npm test` (137 browser integration checks; requires a running bridge + loaded extension) and `npm run test:unit` (7 unit checks).
 
 ## Multi-browser
 

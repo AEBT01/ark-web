@@ -287,6 +287,26 @@ async function main() {
       check('网页来源 /health 仍拒绝', evil.status === 403, evil.status);
     }
 
+    if (should('http')) {
+      const q = await fetch(BASE + '/status?token=' + encodeURIComponent(TOKEN));
+      check('URL query token 不再被接受', q.status === 401, q.status);
+
+      const oversized = new ReadableStream({
+        start(controller) {
+          const chunk = new Uint8Array(256 * 1024);
+          for (let i = 0; i < 9; i++) controller.enqueue(chunk);
+          controller.close();
+        }
+      });
+      const over = await fetch(BASE + '/cmd', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: oversized,
+        duplex: 'half'
+      });
+      check('超大 chunked body 返回 413 而不是断连', over.status === 413, over.status);
+    }
+
   } catch (e) {
     check('回归流程未异常中断', false, e && e.stack || e);
   } finally {

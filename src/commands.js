@@ -583,18 +583,17 @@ export async function dispatch(cmd, args) {
         const x = info.point.x + off.x;
         const y = info.point.y + off.y;
         if (x >= 0 && y >= 0 && x <= vp.vw && y <= vp.vh) {
-          try {
-            await ensureFocusEmulation(tab.id);
-            await input.mouseMove(tab.id, x, y);
-          } finally {
-            await releaseFocusEmulation(tab.id).catch(() => null);
-          }
+          await ensureFocusEmulation(tab.id);
+          await input.mouseMove(tab.id, x, y);
           via = 'cdp';
         }
       }
       if (via === 'synthetic') await frames.invoke(tab.id, t.frameId, 'hoverLocal', [t.localRef]);
       await sleep(180);
       const hs = await frames.invoke(tab.id, t.frameId, 'hoverState', [t.localRef]).catch(() => null);
+      // hover 的效果本身就是“持续到下一次鼠标移动”：立刻清焦点仿真会让后台页的 :hover 立即消失，
+      // 因此给 1.5 秒观察窗口后再恢复，既保住 hover 语义，又不长期改变页面可见性。
+      if (via === 'cdp') setTimeout(() => { releaseFocusEmulation(tab.id).catch(() => null); }, 1500);
       return { ref: t.ref, via, hoverActive: !!(hs && hs.hover), hoverChain: (hs && hs.chain) || 0 };
     }
 

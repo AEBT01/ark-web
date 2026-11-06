@@ -228,14 +228,15 @@ frame 会动态出现：每次调用前用「小探针 + 只补缺的」方式�
 ## 七、自检
 
 ```powershell
-npm test                         # 三套全跑
+npm test                         # 三套全跑（137 项）
 node test\selftest.js            # 49 项：基础回归（连接/抽取/表格/表单/翻页/错误码）
 node test\verify.js              # 45 项：专项验收（跨边界/跨域真输入/真实悬停/富文本/指纹/拦截/截图/覆盖率/模拟/视觉差异）
-node test\regression.js          # 41 项：修复回归（跨 frame text/state/upload、HAR 正文、rowspan、多浏览器、密码/ref/WS 等）
+node test\regression.js          # 43 项：修复回归（跨 frame text/state/upload、HAR 正文、rowspan、多浏览器、密码/ref/WS 等）
 node test\selftest.js -k extract # 只跑名字含 extract 的项
+npm run test:unit                # 7 项纯函数/元数据单测，不需要浏览器
 ```
 
-两套都自带夹具服务、不依赖外网，退出码 0 即全绿。`verify.js` 覆盖的是这一版修掉的缺陷，
+三套都自带夹具服务、不依赖外网，退出码 0 即全绿。`verify.js` 覆盖的是这一版修掉的缺陷，
 改任何与元素、输入、截图相关的东西都应该跑它。
 
 夹具：`test/fixture.html`（通用）、`test/probe.html`（专项：iframe、shadow、富文本、

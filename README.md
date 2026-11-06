@@ -100,13 +100,13 @@ node client\browser-client.js fanout "snapshot --limit 20 --no-shot"   # 所有�
 ## 测试
 
 ```powershell
-npm test                 # 三套全跑
+npm test                 # 三套全跑（137 项）
 node test\selftest.js    # 49 项：基础回归（连接/抽取/表格/表单/翻页/错误码）
 node test\verify.js      # 45 项：专项验收（跨边界/跨域真输入/真实悬停/富文本/指纹/拦截/截图/覆盖率/环境模拟/视觉差异）
-node test\regression.js  # 41 项：修复回归（跨 frame text/state/upload、HAR 正文、rowspan、多浏览器、密码/ref/WS 等）
+node test\regression.js  # 43 项：修复回归（跨 frame text/state/upload、HAR 正文、rowspan、多浏览器、密码/ref/WS 等）
 ```
 
-三套都自带夹具、不依赖外网；退出码 0 即全绿。
+另加 `npm run test:unit`（7 项纯函数/元数据单测）。三套集成测试都自带夹具、不依赖外网；退出码 0 即全绿。
 
 ## 与技能卡的关系
 

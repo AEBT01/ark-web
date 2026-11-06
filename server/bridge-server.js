@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { sanitizeArgs, redactUrl, sanitizeText } from '../shared/redaction.mjs';
 
-const VERSION = '5.1.1';
+const VERSION = '5.1.2';
 const PORT = Number(process.env.ARK_WEB_PORT || 9333);
 const HOST = '127.0.0.1';
 const EXT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -404,12 +404,20 @@ const server = http.createServer({ headersTimeout: 5000, requestTimeout: 15000, 
     const chunks = [];
     let bytes = 0;
     let tooLarge = false;
-    for await (const chunk of req) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      bytes += buf.length;
-      if (bytes > MAX_BODY) { tooLarge = true; req.destroy(); break; }
-      chunks.push(buf);
-    }
+    await new Promise((resolve, reject) => {
+      req.on('data', (chunk) => {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytes += buf.length;
+        if (bytes > MAX_BODY) {
+          tooLarge = true;
+          chunks.length = 0; // 继续消费但不再占内存，保证还能返回 413
+          return;
+        }
+        chunks.push(buf);
+      });
+      req.on('end', resolve);
+      req.on('error', reject);
+    });
     if (tooLarge) return json(res, 413, { error: `请求体超过上限 ${MAX_BODY} 字节`, code: 'E_TOO_LARGE' });
     const raw = Buffer.concat(chunks).toString('utf8');
     let body;
